@@ -112,10 +112,14 @@ debugfs -w -R "rm /.please_resize_me" "$(p 2)"
 listing=$(debugfs -R "ls -l /" "$(p 2)" 2>/dev/null)
 [[ $listing != *please_resize_me* ]] || die "resize flag still present"
 
+# Stale data from an earlier layout can look like a filesystem to libblkid, and
+# mkfs.exfat (exfatprogs >= 1.4) refuses with "Device has existing signatures".
+unmount_dev
+wipefs -a "$(p 3)" "$(p 5)" >/dev/null
 log "Creating exFAT GAMES (AmberELEC roms) on $(p 3)"
-mkfs.exfat -c 16K -L GAMES "$(p 3)"      # AmberELEC creates its folders via tmpfiles.d
+mkfs.exfat -F -c 16K -L GAMES "$(p 3)"      # AmberELEC creates its folders via tmpfiles.d
 log "Creating exFAT EASYROMS (dArkOS roms) on $(p 5)"
-mkfs.exfat -c 16K -L EASYROMS "$(p 5)"
+mkfs.exfat -F -c 16K -L EASYROMS "$(p 5)"
 unmount_dev
 
 # ---------------------------------------------------------------- 4. dArkOS first-boot work
