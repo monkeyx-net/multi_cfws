@@ -18,19 +18,26 @@ from the first partition, so one shared `boot.ini` reads the Vol- key
 | raw | 16M | U-Boot (sectors 64–32767, taken from the dArkOS G350 image) |
 | p1 | 2G | FAT32 `AMBRELC`: AmberELEC KERNEL/SYSTEM + shared `boot.ini` |
 | p2 | 8G | ext4 `STORAGE`: AmberELEC `/storage` |
-| p3 | rest (~32G) | exFAT `EASYROMS`: **shared ROMs** (AmberELEC `/storage/roms`, dArkOS `/roms`) |
+| p3 | 16G | exFAT `GAMES`: AmberELEC ROMs (`/storage/roms`) |
 | p4 | | extended |
-| p5 | 100M | FAT `BOOT`: dArkOS `/boot` |
-| p6 | 16G | btrfs `ROOTFS`: dArkOS root (`root=PARTUUID=5a3c9e71-06`) |
+| p5 | rest (~16G) | exFAT `EASYROMS`: dArkOS ROMs (`/roms`) |
+| p6 | 100M | FAT `BOOT`: dArkOS `/boot` |
+| p7 | 16G | btrfs `ROOTFS`: dArkOS root (`root=PARTUUID=5a3c9e71-07`) |
 
-Why p3 must be EASYROMS: AmberELEC's initramfs mounts `mmcblk?p3` as its games
-partition and **powers off** if it is not exFAT/ext4.
+Each OS has its own ROMs partition:
+
+- AmberELEC's initramfs (built into `KERNEL`, so it can't be edited) mounts the
+  first existing device from `mmcblk1p3 mmcblk1p1 mmcblk1 mmcblk0p3` at
+  `/storage/roms`, and **powers off** if it is not exFAT/ext4. So p3 has to be
+  AmberELEC's `GAMES`. It is left empty: AmberELEC creates its system folders
+  on boot (`tmpfiles.d/amberelec-dirs.conf`).
+- dArkOS mounts `LABEL=EASYROMS`, so its ROMs can live in logical partition p5.
 
 The script also does the first-boot work of both systems ahead of time and disables
 their first-boot scripts, which would otherwise repartition the card:
 
 - AmberELEC: grows STORAGE, deletes `/.please_resize_me`
-- dArkOS: makes EASYROMS, extracts `roms.tar` and the themes into it, installs
+- dArkOS: formats EASYROMS (p5), extracts `roms.tar` and the themes into it, installs
   `fstab.exfat` as `/etc/fstab`, and disables `firstboot.service` /
   `expandtoexfat.sh`
 
@@ -55,7 +62,7 @@ Requires: `sfdisk wipefs e2fsprogs btrfs-progs exfatprogs tar dd`.
 
 - `flash-dualboot.sh`: builds the card
 - `boot.ini`: shared dual-boot script, installed on p1 (also as `boot.ini.dualboot`)
-- `boot.ini.darkos`: dArkOS's own `/boot/boot.ini`, adjusted for p5/p6
+- `boot.ini.darkos`: dArkOS's own `/boot/boot.ini`, adjusted for p6/p7
 
 ## Notes
 

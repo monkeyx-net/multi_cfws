@@ -1,17 +1,17 @@
 odroidgoa-uboot-config
 
-# dArkOS /boot copy (dual-boot layout: BOOT=p5, ROOTFS=p6). U-Boot only reads
+# dArkOS /boot copy (dual-boot layout: BOOT=p6, ROOTFS=p7). U-Boot only reads
 # boot.ini from p1; this file is kept consistent in case it is ever used.
-setenv bootargs "root=PARTUUID=5a3c9e71-06 rootwait rw fsck.repair=yes net.ifnames=0 fbcon=rotate:0 console=/dev/ttyFIQ0 quiet splash consoleblank=0 vt.global_cursor_default=0"
+setenv bootargs "root=PARTUUID=5a3c9e71-07 rootwait rw fsck.repair=yes net.ifnames=0 fbcon=rotate:0 console=/dev/ttyFIQ0 quiet splash consoleblank=0 vt.global_cursor_default=0"
 
 # Booting
 setenv loadaddr "0x02000000"
 setenv initrd_loadaddr "0x04000000"
 setenv dtb_loadaddr "0x01f00000"
 
-load mmc 1:5 ${loadaddr} Image
-load mmc 1:5 ${initrd_loadaddr} uInitrd
+load mmc 1:6 ${loadaddr} Image
+load mmc 1:6 ${initrd_loadaddr} uInitrd
 
-load mmc 1:5 ${dtb_loadaddr} rk3326-g350-linux.dtb
+load mmc 1:6 ${dtb_loadaddr} rk3326-g350-linux.dtb
 
 booti ${loadaddr} ${initrd_loadaddr} ${dtb_loadaddr}

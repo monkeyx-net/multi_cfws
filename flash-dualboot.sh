@@ -9,7 +9,7 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 IMGDIR=${IMGDIR:-/run/media/tim/DATA/torrent.linux/img}   # override: sudo IMGDIR=/path bash ...
 AMB=$IMGDIR/AmberELEC-RG351MP.aarch64-prerelease-20261019_1835.img
 DARK=$IMGDIR/dArkOS_G350_trixie_01012026.img
-DISKID=0x5a3c9e71            # must match root=PARTUUID=5a3c9e71-06 in boot.ini
+DISKID=0x5a3c9e71            # must match root=PARTUUID=5a3c9e71-07 in boot.ini
 S=512
 MNT=$(mktemp -d /tmp/g350dual.XXXX)
 
@@ -59,11 +59,17 @@ wipefs -a "$DEV"
 TOTAL=$(blockdev --getsz "$DEV")
 P1_START=32768;            P1_SIZE=$((2*1024*1024*2))      # 2 GiB  AMBRELC
 P2_START=$((P1_START+P1_SIZE)); P2_SIZE=$((8*1024*1024*2)) # 8 GiB  STORAGE
-P3_START=$((P2_START+P2_SIZE))                             # EASYROMS (shared)
+# p3 must be AmberELEC's games partition: its initramfs (inside KERNEL) mounts the
+# first of mmcblk1p3/mmcblk1p1/mmcblk1/mmcblk0p3 at /storage/roms. dArkOS mounts
+# LABEL=EASYROMS, so its roms live in a logical partition (p5) instead.
+P3_START=$((P2_START+P2_SIZE)); P3_SIZE=$((16*1024*1024*2)) # 16 GiB GAMES (AmberELEC)
+EXT_START=$((P3_START+P3_SIZE))                            # p4 extended
+P5_START=$((EXT_START+2048))                               # EASYROMS (dArkOS), rest
 BOOT_SIZE=$((100*1024*2)); ROOT_SIZE=$((16*1024*1024*2))   # 100M BOOT, 16G ROOTFS
-EXT_NEED=$((2048 + BOOT_SIZE + 2048 + ROOT_SIZE))
-P3_SIZE=$(( (TOTAL - P3_START - EXT_NEED - 2048) / 2048 * 2048 ))
-(( P3_SIZE > 0 )) || die "card too small"
+P5_SIZE=$(( (TOTAL - P5_START - 2048 - BOOT_SIZE - 2048 - ROOT_SIZE - 2048) / 2048 * 2048 ))
+(( P5_SIZE > 0 )) || die "card too small"
+P6_START=$((P5_START+P5_SIZE+2048))                        # BOOT
+P7_START=$((P6_START+BOOT_SIZE+2048))                      # ROOTFS, fills to end
 
 log "Writing MBR (label-id $DISKID)"
 sfdisk --wipe always --wipe-partitions always "$DEV" <<EOF
@@ -74,13 +80,14 @@ unit: sectors
 start=$P1_START, size=$P1_SIZE, type=c, bootable
 start=$P2_START, size=$P2_SIZE, type=83
 start=$P3_START, size=$P3_SIZE, type=7
-start=$((P3_START+P3_SIZE)), type=5
-size=$BOOT_SIZE, type=c
-type=83
+start=$EXT_START, type=5
+start=$P5_START, size=$P5_SIZE, type=7
+start=$P6_START, size=$BOOT_SIZE, type=c
+start=$P7_START, type=83
 EOF
 partprobe "$DEV" 2>/dev/null || blockdev --rereadpt "$DEV" || true
 unmount_dev
-for n in 1 2 3 5 6; do [[ -b $(p $n) ]] || die "$(p $n) missing after partitioning"; done
+for n in 1 2 3 5 6 7; do [[ -b $(p $n) ]] || die "$(p $n) missing after partitioning"; done
 
 # ---------------------------------------------------------------- 2. U-Boot
 log "Writing U-Boot (sectors 64-32767) from dArkOS G350 image"
@@ -94,8 +101,8 @@ copy_part() {  # image start size target
 }
 copy_part "$AMB"  $AMB_P1_START $AMB_P1_SIZE "$(p 1)"
 copy_part "$AMB"  $AMB_P2_START $AMB_P2_SIZE "$(p 2)"
-copy_part "$DARK" $DRK_P1_START $DRK_P1_SIZE "$(p 5)"
-copy_part "$DARK" $DRK_P2_START $DRK_P2_SIZE "$(p 6)"
+copy_part "$DARK" $DRK_P1_START $DRK_P1_SIZE "$(p 6)"
+copy_part "$DARK" $DRK_P2_START $DRK_P2_SIZE "$(p 7)"
 unmount_dev
 
 log "AmberELEC STORAGE: fsck + grow to 8G + remove .please_resize_me"
@@ -105,17 +112,19 @@ debugfs -w -R "rm /.please_resize_me" "$(p 2)"
 listing=$(debugfs -R "ls -l /" "$(p 2)" 2>/dev/null)
 [[ $listing != *please_resize_me* ]] || die "resize flag still present"
 
-log "Creating shared exFAT EASYROMS on $(p 3)"
-mkfs.exfat -c 16K -L EASYROMS "$(p 3)"
+log "Creating exFAT GAMES (AmberELEC roms) on $(p 3)"
+mkfs.exfat -c 16K -L GAMES "$(p 3)"      # AmberELEC creates its folders via tmpfiles.d
+log "Creating exFAT EASYROMS (dArkOS roms) on $(p 5)"
+mkfs.exfat -c 16K -L EASYROMS "$(p 5)"
 unmount_dev
 
 # ---------------------------------------------------------------- 4. dArkOS first-boot work
 mkdir -p "$MNT/root" "$MNT/boot" "$MNT/roms" "$MNT/amb"
-mount -t btrfs -o compress=zlib:1 "$(p 6)" "$MNT/root"
-mount -t vfat  "$(p 5)" "$MNT/boot"
-mount -t exfat "$(p 3)" "$MNT/roms"
+mount -t btrfs -o compress=zlib:1 "$(p 7)" "$MNT/root"
+mount -t vfat  "$(p 6)" "$MNT/boot"
+mount -t exfat "$(p 5)" "$MNT/roms"
 
-log "Growing btrfs ROOTFS to fill $(p 6)"
+log "Growing btrfs ROOTFS to fill $(p 7)"
 btrfs filesystem resize max "$MNT/root"
 
 log "Extracting /roms.tar into EASYROMS (as expandtoexfat.sh does)"
@@ -155,8 +164,10 @@ for d in amb roms boot root; do umount "$MNT/$d"; done
 # ---------------------------------------------------------------- 6. verify
 log "Verification"
 sfdisk -d "$DEV"
-blkid "$(p 1)" "$(p 2)" "$(p 3)" "$(p 5)" "$(p 6)"
-blkid -s PARTUUID -o value "$(p 6)" | grep -qi '^5a3c9e71-06$' || die "PARTUUID of $(p 6) is not 5a3c9e71-06"
+blkid "$(p 1)" "$(p 2)" "$(p 3)" "$(p 5)" "$(p 6)" "$(p 7)"
+blkid -s PARTUUID -o value "$(p 7)" | grep -qi '^5a3c9e71-07$' || die "PARTUUID of $(p 7) is not 5a3c9e71-07"
+blkid -s LABEL -o value "$(p 3)" | grep -q '^GAMES$'    || die "$(p 3) is not GAMES"
+blkid -s LABEL -o value "$(p 5)" | grep -q '^EASYROMS$' || die "$(p 5) is not EASYROMS"
 blkid -s UUID -o value "$(p 1)" | grep -q '^1910-5621$' || die "AMBRELC UUID changed"
 blkid -s UUID -o value "$(p 2)" | grep -q '^7ab6cd9f-77f8-4d13-905e-aa8fc5baa800$' || die "STORAGE UUID changed"
 dumpe2fs -h "$(p 2)" 2>/dev/null | grep -E 'Block count|Block size'
