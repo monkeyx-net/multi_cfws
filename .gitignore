@@ -3,3 +3,7 @@
 *.zip
 *.xz
 *.gz
+*.7z
+/img/*
+!/img/.gitkeep
+boot.ini.generated

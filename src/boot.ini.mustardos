@@ -1,0 +1,15 @@
+odroidgoa-uboot-config
+
+# MustardOS boot.ini for the G350 multi-boot card, installed on p@BOOT@ (MustardOS BOOT)
+# for reference only: U-Boot only reads boot.ini from p1, where the shared multi-boot
+# boot.ini picks the OS. The original is boot.ini.orig.
+# Uses the dArkOS odroidgoa U-Boot, so the header is odroidgoa-uboot-config,
+# not BATLEXP-UBOOT-CONFIG.
+
+setenv bootargs "root=PARTUUID=5a3c9e71-@ROOT2@ rootfstype=ext4 rw rootwait quiet loglevel=0 cma=64M fbcon=nodefer vt.global_cursor_default=0 init=/sbin/init"
+setenv loadaddr "0x02000000"
+setenv dtb_loadaddr "0x01f00000"
+
+load mmc 1:@BOOT@ ${loadaddr} Image
+load mmc 1:@BOOT@ ${dtb_loadaddr} rk3326-batlexp-linux.dtb
+booti ${loadaddr} - ${dtb_loadaddr}
