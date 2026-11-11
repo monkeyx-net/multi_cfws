@@ -293,7 +293,8 @@ What each OS needs, and what the script does about it:
 - To change `boot.scr`, edit `boot.cmd` on `BOOTSEL`, then rebuild with
   `mkimage -A arm64 -O linux -T script -C none -d boot.cmd boot.scr`.
 - knulli's own dtb for the RGB30 **v2** panel is `boot/rk3566-rgb30-v2-linux.dtb`.
-  Change `KNU_DTB` in the script (or the knulli branch of `boot.cmd`) on a v2 unit.
+  Change `dtb["knulli"]` in `rgb30()` in the script (or the knulli branch of `boot.cmd`)
+  on a v2 unit.
 - knulli and ROCKNIX updates only touch files on their own boot partitions.
   ROCKNIX's update copies DTBs but does not rewrite U-Boot.
 
@@ -301,16 +302,18 @@ What each OS needs, and what the script does about it:
 
 **This erases the whole target device.**
 
-```sh
-sudo bash src/flash-dualboot.sh [--device g350|rgb30] --os LIST [--default OS] [--plan] [/dev/sdX]
+`src/flash-dualboot.py` needs Python 3.8 or newer (standard library only).
 
-sudo bash src/flash-dualboot.sh --os amberelec,darkos,mustardos /dev/sdb   # G350, dArkOS default
-sudo bash src/flash-dualboot.sh --os amberelec,mustardos --default mustardos /dev/sdb
-sudo bash src/flash-dualboot.sh --device rgb30 --os darkos,knulli,rocknix /dev/sdb
-bash src/flash-dualboot.sh --plan --os darkos,mustardos     # dry run, no root needed
-bash src/flash-dualboot.sh --plan --device rgb30 --os knulli,rocknix
+```sh
+sudo python3 src/flash-dualboot.py [--device g350|rgb30] --os LIST [--default OS] [--plan] [/dev/sdX]
+
+sudo python3 src/flash-dualboot.py --os amberelec,darkos,mustardos /dev/sdb   # G350, dArkOS default
+sudo python3 src/flash-dualboot.py --os amberelec,mustardos --default mustardos /dev/sdb
+sudo python3 src/flash-dualboot.py --device rgb30 --os darkos,knulli,rocknix /dev/sdb
+python3 src/flash-dualboot.py --plan --os darkos,mustardos     # dry run, no root needed
+python3 src/flash-dualboot.py --plan --device rgb30 --os knulli,rocknix
 # images somewhere else:
-sudo IMGDIR=/path/to/images bash src/flash-dualboot.sh --os darkos,mustardos /dev/sdb
+sudo IMGDIR=/path/to/images python3 src/flash-dualboot.py --os darkos,mustardos /dev/sdb
 ```
 
 - `--device`: `g350` (default) or `rgb30`.
@@ -321,22 +324,9 @@ sudo IMGDIR=/path/to/images bash src/flash-dualboot.sh --os darkos,mustardos /de
 - `--plan`: print the key mapping, partition layout, sfdisk script and generated
   `boot.ini` / `boot.cmd` files (and `multiboot-next`), then exit without touching anything. The target defaults to `/dev/sdb`.
 
-The script checks that the device is about 58GiB and is not the system disk, asks
+The script checks that the device is a removable disk or SD slot of 32GB–2TiB and is
+not the system disk (the ROM partitions grow with the card), asks
 you to type `YES`, then does everything, verifies the result and ejects the card.
-
-### Python version (being tested)
-
-`src/flash-dualboot.py` does the same job with the same options. It needs Python 3.8 or
-newer, standard library only:
-
-```sh
-sudo python3 src/flash-dualboot.py --os amberelec,darkos,mustardos /dev/sdb
-python3 src/flash-dualboot.py --plan --os darkos,mustardos
-```
-
-Its `--plan` output is byte-identical to the bash script's for every OS combination,
-and the two scripts leave the same files on a simulated card. It has not flashed a
-real card yet, so the bash script stays the reference until it has, on both devices.
 
 ### Installing the tools
 
@@ -345,7 +335,7 @@ Requires: `sfdisk wipefs e2fsprogs btrfs-progs exfatprogs tar dd`, plus
 (`unsquashfs`) with ROCKNIX. The RGB30, and the G350 with ROCKNIX, also need
 `uboot-tools` (`mkimage`). The script checks for the tools it needs before it
 touches the card. The commands below install everything for every combination,
-plus Python 3 for `flash-dualboot.py`.
+plus Python 3.
 
 Ubuntu / Debian (Ubuntu 22.04 or newer, for `exfatprogs`):
 
@@ -382,8 +372,7 @@ are `btrfs-progs`, `exfatprogs`, `squashfs-tools` and `u-boot-tools`.
 
 ## Files
 
-- `src/flash-dualboot.sh`: builds the card
-- `src/flash-dualboot.py`: the same in Python (see Usage), one class per OS
+- `src/flash-dualboot.py`: builds the card (see Usage); one class per OS
 - `src/boot.ini.generated` (not in git): the shared boot script from the last run,
   installed on p1 as `boot.ini` and `boot.ini.dualboot`
 - `src/boot.cmd.generated` (not in git): the RGB30 boot script source from the last

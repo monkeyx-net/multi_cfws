@@ -1323,9 +1323,20 @@ def preflight(c: Choices):
         if not shutil.which(t):
             die(f"missing tool: {t}")
 
+    # Guard against the wrong disk: a whole removable disk (USB reader) or an SD slot
+    # (mmcblk), 32GB-2TiB (MBR limit). The layout itself scales to the card size and
+    # refuses cards too small for the selected OSes (make_layout).
+    name = os.path.basename(os.path.realpath(c.dev))
+    sysfs = f"/sys/block/{name}"
+    if not os.path.isdir(sysfs):
+        die(f"{c.dev} is not a whole disk (give the disk, e.g. /dev/sdb, not a partition)")
+    with open(f"{sysfs}/removable") as f:
+        removable = f.read().strip() == "1"
+    if not (removable or name.startswith("mmcblk")):
+        die(f"{c.dev} is not a removable disk or SD card slot")
     size = int(output(["blockdev", "--getsize64", c.dev]))
-    if not 55 * 1000**3 < size < 66 * 1000**3:
-        die(f"{c.dev} is {size} bytes, expected the ~62.5GB (58.2GiB) card")
+    if not 32 * 1000**3 <= size < 2 * 1024**4:
+        die(f"{c.dev} is {size} bytes, expected an SD card of 32GB to 2TiB")
     if output(["findmnt", "-rno", "SOURCE", "/"], check=False).startswith(c.dev):
         die(f"{c.dev} holds the running root fs!")
     c.total = int(output(["blockdev", "--getsz", c.dev]))
