@@ -974,6 +974,10 @@ class Knulli(OS):
     key, name, prefix = "knulli", "knulli", "KNU"
     copied = ("KNU_BOOT",)
     roms = ("KNU_SHARE", "SHARE", "knulli /userdata")   # what knulli's autoresize would leave
+    # G350: vibrates from ~3 s after power-on until knulli's logo (its S01pwm stops the
+    # rumble motor). Tried from boot.ini, all on a G350: "gpio set 15" (no change), PWM0
+    # at 100% duty (no change), that plus pin mux to PWM0 and PWM0 disabled in its dtb
+    # (both: vibration that never stops). Left as is.
     # G350: knulli's boot.ini loads boot/linux (a uImage that bootm copies to 0x01080000)
     # at 0x02000000; that overlaps its copy, which mainline U-Boot refuses, so the
     # uImage and uInitrd are loaded higher up.

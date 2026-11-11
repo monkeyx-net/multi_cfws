@@ -82,9 +82,10 @@ Vol- AmberELEC, Vol+ MustardOS.
   and parses one digit only (`layout_g350` checks it). Vendor 4.4 kernel as a uImage
   (`bootm`); the uImage is loaded at `0x03000000`, not knulli's `0x02000000`, because
   `bootm` copies it to `0x01080000` and mainline U-Boot refuses overlapping copies. Boots
-  in `ini` mode (tested), but vibrates for a few seconds at boot (rumble motor on PWM0,
-  GPIO0_B7, stopped only by knulli's `S01pwm`; `gpio set 15` in `boot.ini` did not help).
-  `scr-g350` untested.
+  in `ini` mode (tested), but vibrates from ~3 s after power-on until the knulli logo
+  (rumble motor on PWM0, GPIO0_B7, active low; only knulli's `S01pwm` stops it). Tried on
+  a G350, none helped: `gpio set 15`; PWM0 at 100% duty via `mw.l` (no change); plus pin
+  mux to PWM0, or PWM0 disabled in knulli's dtb (both: constant vibration). Left as is. `scr-g350` untested.
 - **ArkOS (both devices)** boots by `root=PARTUUID`; its fstab is rewritten to PARTUUIDs
   (`ArkOS.fstab`) and its BOOT/ROMS are labelled `ARKBOOT`/`ARKROMS`, because dArkOS
   mounts `LABEL=BOOT`/`LABEL=EASYROMS`. The G350 build is the RG351MP image; its dtb drives

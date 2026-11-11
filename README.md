@@ -188,9 +188,13 @@ the same files and bootargs, but loads the uImage at `0x03000000` and the initrd
 address `0x01080000`, which would overlap the uImage at `0x02000000` (mainline U-Boot
 refuses that).
 
-**Known issue:** the device vibrates for a few seconds when knulli boots. knulli's dtb
-gives its joypad driver no PWM, so the rumble motor (PWM0, GPIO0_B7) is only switched off
-when knulli's `S01pwm` runs. `gpio set 15` in its `boot.ini` branch did not help.
+**Known issue, rumble at boot:** the device vibrates from about 3 seconds after
+power-on until the knulli logo, when knulli's `S01pwm` switches the rumble motor (PWM0,
+pin GPIO0_B7) off. dArkOS's dtb gives that PWM to its joypad driver, which stops the motor
+early; knulli's kernel has no rumble support in its joypad driver. Tried on a G350, none
+of which helped: `gpio set 15` in `boot.ini`; starting PWM0 at 100% duty with `mw.l`; the
+same plus switching the pin to PWM0 (vibration that never stopped); PWM0 disabled in
+knulli's dtb (vibration that never stopped).
 
 As on the RGB30, knulli takes the *next* partition as `/userdata`, single digit only,
 so it is always the first logical pair, **p5/p6**. The image's 512M ext4 data partition
