@@ -5,8 +5,8 @@ for one device (3 at most: no key, Vol- and Vol+):
 
 | Device | OSes you can pick (`--os`) | Image that is **always** needed |
 |---|---|---|
-| **G350** (`--device g350`, the default) | `amberelec darkos mustardos rocknix` | **dArkOS G350**, even without `darkos` in `--os`. With `rocknix`: **ROCKNIX** instead |
-| **RGB30** (`--device rgb30`, see [RGB30](#rgb30)) | `darkos knulli rocknix` | **knulli**, even without `knulli` in `--os` |
+| **G350** (`--device g350`, the default) | `amberelec arkos darkos knulli mustardos rocknix` | **dArkOS G350**, even without `darkos` in `--os`. With `rocknix`: **ROCKNIX** instead |
+| **RGB30** (`--device rgb30`, see [RGB30](#rgb30)) | `arkos darkos knulli rocknix` | **knulli**, even without `knulli` in `--os` |
 
 The card's U-Boot is copied from that image. It must be in `img/` even if you don't
 install that OS. The script stops before touching the card if it is missing, and
@@ -18,6 +18,9 @@ G350 images:
 - `AmberELEC-RG351MP.aarch64-prerelease-20261019_1835.img`
 - `MustardOS_RK-G350-V_2606.0_ANDROMEDA-db2a3bd0.img`
 - `ROCKNIX-RK3326.aarch64-20261101-b.img` (see [ROCKNIX on the G350](#rocknix-on-the-g350))
+- `ArkOS_RG351MP_v2.0_12242024.img` (see [ArkOS](#arkos-g350-and-rgb30))
+- `knulli-rk3326-g350-scarab-20260510.img` (see [knulli on the G350](#knulli-on-the-g350);
+  unpack the `.img.gz` first: `gunzip -k`)
 
 Put the images in `img/` at the repo root (git-ignored; set `IMGDIR` to use
 another folder). **Always needed on the G350: the dArkOS G350 image**, even when
@@ -33,7 +36,8 @@ and the default settings:
 | Vol+ | MustardOS |
 
 In general, the `--default` OS boots with no key held. The other selected OSes,
-in the fixed order AmberELEC, dArkOS, MustardOS, ROCKNIX, get Vol- and then Vol+. The
+in the fixed order AmberELEC, ArkOS, dArkOS, knulli, MustardOS, ROCKNIX, get Vol- and
+then Vol+. The
 script prints the mapping before it asks for confirmation.
 
 ### Booting another OS once (`multiboot-next`)
@@ -52,7 +56,7 @@ script installs it on every OS of the card, here (`--plan` prints the list too):
 
 | OS | Path |
 |---|---|
-| dArkOS, MustardOS | `/usr/local/bin/multiboot-next` |
+| ArkOS, dArkOS, MustardOS | `/usr/local/bin/multiboot-next` |
 | AmberELEC, ROCKNIX | `/storage/bin/multiboot-next` |
 | knulli | `/userdata/multiboot-next` (exFAT: run it with `sh /userdata/multiboot-next`) |
 
@@ -99,10 +103,11 @@ partitions of the selected OSes. With only two OSes the numbering shifts:
 - Without AmberELEC, p1 is a 64M FAT32 `BOOTSEL` partition that only holds
   `boot.ini` and `logo.bmp` (no OS update ever writes to it), and p2 is the extended
   partition. p3/p4 do not exist.
-- Logical partitions always start at p5 and are handed out in order: dArkOS
-  (EASYROMS, BOOT, ROOTFS), then ROCKNIX (ROCKNIX, STORAGE, GAMES), then MustardOS
-  (BOOT, ROOTFS, ROMS), so MustardOS ROMS stays last. E.g. with
-  AmberELEC + MustardOS, MustardOS uses p5/p6/p7.
+- Logical partitions always start at p5 and are handed out in order: knulli
+  (KNULLI, SHARE), dArkOS (EASYROMS, BOOT, ROOTFS), ArkOS (ARKBOOT, root, ARKROMS),
+  ROCKNIX (ROCKNIX, STORAGE, GAMES), then MustardOS (BOOT, ROOTFS, ROMS), so MustardOS
+  ROMS stays last and knulli is always p5/p6. E.g. with AmberELEC + MustardOS,
+  MustardOS uses p5/p6/p7.
 - AmberELEC, when selected, always stays on p1/p2/p3.
 
 `--plan` shows the exact layout for a given combination.
@@ -170,6 +175,55 @@ generates `boot.cmd`, compiles it with `mkimage`, and keeps a copy as
 - To go back to the dArkOS U-Boot, write sectors 64–32767 from the dArkOS image; the
   card would then need a `boot.ini` again (re-run the script without ROCKNIX).
 
+### knulli on the G350
+
+**Boots on a G350** (with ArkOS + dArkOS, dArkOS's U-Boot). Not tested with the ROCKNIX
+U-Boot.
+
+The G350 knulli image has a vendor 4.4 kernel and boots from a Hardkernel-style
+`boot.ini`, like dArkOS: `boot/linux` (a uImage, started with `bootm`), `boot/uInitrd`
+and `boot/rk3326-batlexp-linux.dtb`, with `label=KNULLI`. The shared boot script uses
+the same files and bootargs, but loads the uImage at `0x03000000` and the initrd at
+`0x06000000` instead of `0x02000000`/`0x04000000`: `bootm` copies the kernel to its load
+address `0x01080000`, which would overlap the uImage at `0x02000000` (mainline U-Boot
+refuses that).
+
+**Known issue:** the device vibrates for a few seconds when knulli boots. knulli's dtb
+gives its joypad driver no PWM, so the rumble motor (PWM0, GPIO0_B7) is only switched off
+when knulli's `S01pwm` runs. `gpio set 15` in its `boot.ini` branch did not help.
+
+As on the RGB30, knulli takes the *next* partition as `/userdata`, single digit only,
+so it is always the first logical pair, **p5/p6**. The image's 512M ext4 data partition
+is not copied: the script creates an exFAT `SHARE` and sets `autoresize=false` in
+`knulli-boot.conf`.
+
+## ArkOS (G350 and RGB30)
+
+**Not tested on a device yet** (`--plan` warns). ArkOS is dArkOS's parent and works the
+same way; the script does its first-boot work the same way too (`roms.tar` and the themes
+into its ROMs partition, `/etc/fstab`, `firstboot.service` disabled).
+
+- **G350:** the `RG351MP` image (the G350 has no ArkOS image of its own). Vendor 4.4.189
+  kernel, booted like its own `boot.ini` but with `root=PARTUUID=…` and **dArkOS's
+  `rk3326-g350-linux.dtb`**, which the script copies from the dArkOS image onto ArkOS's
+  BOOT (so the dArkOS image is needed with ArkOS). ArkOS's own `rk3326-rg351mp-linux.dtb`
+  is for a different panel: on a G350 it gave a white, then yellow screen with a black
+  border on the left, and ArkOS did not come up. dArkOS's kernel is built from the same
+  4.4.189 tree, and its dtb uses no driver that ArkOS's kernel lacks.
+- **RGB30:** its initramfs hard-codes `/dev/mmcblk1p4` as root, like dArkOS's. Since
+  dArkOS keeps p3/p4/p5, the script patches ArkOS's `uInitrd` instead (one line in
+  `scripts/local`: `local dev_id="/dev/mmcblk1p4"` back to the stock `"$1"`; the
+  original is kept as `uInitrd.orig`), so it follows `root=PARTUUID=…` from any partition.
+  It also applies the two `retroarch.cfg` fixes from its `firstboot.sh`.
+- Its fstab (`/dev/mmcblk0pN` on the G350, `mmcblk1pN` on the RGB30) is rewritten
+  to `PARTUUID=` for `/`, `/boot` and `/roms`.
+- Its BOOT and ROMs partitions are labelled **`ARKBOOT`** and **`ARKROMS`** (instead of
+  `BOOT`/`EASYROMS`), because dArkOS mounts `LABEL=BOOT` and `LABEL=EASYROMS`. Nothing in
+  ArkOS uses these labels.
+- Its root is grown to 12G (its own first boot grows it to about 11GB).
+- ArkOS's optional "Switch to main SD for Roms" tool mounts a hard-coded partition
+  (`mmcblk0p3` / `mmcblk1p5`), which is another OS's partition on this card. Don't use it.
+
 ### MustardOS changes
 
 Partition numbers below are for the all-three layout (p8/p9/p10); with
@@ -199,6 +253,7 @@ AmberELEC + MustardOS only they are p5/p6/p7.
 RGB30 images (also in `img/`):
 
 - `dArkOS_RGB30_trixie_08282026.img`
+- `ArkOS_RGB30_v2.0_02092025.img` (see [ArkOS](#arkos-g350-and-rgb30))
 - `knulli-rk3568-powkiddy-rgb30-scarab-20260510.img`
 - `ROCKNIX-RK3566.aarch64-20261101-Generic.img`
 
@@ -218,7 +273,7 @@ With `--device rgb30 --os darkos,knulli,rocknix` and the default settings:
 | Vol- | knulli |
 | Vol+ | ROCKNIX |
 
-Keys are handed out as on the G350, in the fixed order dArkOS, knulli, ROCKNIX.
+Keys are handed out as on the G350, in the fixed order ArkOS, dArkOS, knulli, ROCKNIX.
 
 ### How it works (RGB30)
 
@@ -260,7 +315,9 @@ The card is **GPT** (the G350 card is MBR). Layout with all three OSes:
 
 With two OSes: dArkOS + knulli is p1–p6 as above; dArkOS + ROCKNIX is
 p1 `BOOTSEL`, p2 ROCKNIX `GAMES`, p3–p5 dArkOS, p6/p7 ROCKNIX; knulli + ROCKNIX is
-p1/p2 knulli, p3 `BOOTSEL`, p4–p6 ROCKNIX. `--plan` shows the exact layout.
+p1/p2 knulli, p3 `BOOTSEL`, p4–p6 ROCKNIX. ArkOS (`ARKBOOT`, root, `ARKROMS`) comes
+after all of these; with dArkOS + ArkOS only, ArkOS's `ARKROMS` fills p2 and its
+BOOT/root are p6/p7. `--plan` shows the exact layout.
 
 What each OS needs, and what the script does about it:
 
@@ -318,7 +375,8 @@ sudo IMGDIR=/path/to/images python3 src/flash-dualboot.py --os darkos,mustardos 
 
 - `--device`: `g350` (default) or `rgb30`.
 - `--os` (required): comma list naming 2 or 3 OSes of that device. There is no
-  default: G350 `amberelec darkos mustardos rocknix`, RGB30 `darkos knulli rocknix`.
+  default: G350 `amberelec arkos darkos knulli mustardos rocknix`, RGB30
+  `arkos darkos knulli rocknix`.
 - `--default`: the OS that boots with no key held. Must be one of `--os`. Default:
   dArkOS if selected, otherwise the first OS listed in `--os`.
 - `--plan`: print the key mapping, partition layout, sfdisk script and generated
@@ -331,7 +389,7 @@ you to type `YES`, then does everything, verifies the result and ejects the card
 ### Installing the tools
 
 Requires: `sfdisk wipefs e2fsprogs btrfs-progs exfatprogs tar dd`, plus
-`dosfstools` (`mkfs.vfat`) when AmberELEC is not selected, and `squashfs-tools`
+`dosfstools` (`mkfs.vfat`) when AmberELEC is not selected (`fatlabel` with ArkOS), and `squashfs-tools`
 (`unsquashfs`) with ROCKNIX. The RGB30, and the G350 with ROCKNIX, also need
 `uboot-tools` (`mkimage`). The script checks for the tools it needs before it
 touches the card. The commands below install everything for every combination,
@@ -360,7 +418,7 @@ sudo pacman -Syu --needed util-linux e2fsprogs btrfs-progs exfatprogs dosfstools
 | `e2fsck`, `resize2fs`, `debugfs`, `dumpe2fs` | `e2fsprogs` | `e2fsprogs` |
 | `btrfs` | `btrfs-progs` | `btrfs-progs` |
 | `mkfs.exfat` | `exfatprogs` | `exfatprogs` |
-| `mkfs.vfat` | `dosfstools` | `dosfstools` |
+| `mkfs.vfat`, `fatlabel` | `dosfstools` | `dosfstools` |
 | `unsquashfs` | `squashfs-tools` | `squashfs-tools` |
 | `mkimage` | `u-boot-tools` | `uboot-tools` |
 | `partprobe` | `parted` | `parted` |
@@ -379,6 +437,7 @@ are `btrfs-progs`, `exfatprogs`, `squashfs-tools` and `u-boot-tools`.
   run, installed on p1 as `boot.cmd` and compiled to `boot.scr`
 - `src/boot.ini.darkos`: template for dArkOS's own `/boot/boot.ini` (`@BOOT@`/`@ROOT@`/`@ROOT2@`
   are filled in by the script)
+- `src/boot.ini.arkos`: the same for ArkOS's `/boot/boot.ini` on the G350
 - `src/boot.ini.mustardos`: template for the MustardOS-only `boot.ini`, installed on
   MustardOS BOOT for reference
 - `src/multiboot-next`: template for the [`multiboot-next`](#booting-another-os-once-multiboot-next)
