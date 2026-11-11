@@ -1136,8 +1136,9 @@ ALL_OSES = [AmberELEC(), DarkOS(), ArkOS(), MustardOS(), Knulli(), Rocknix()]
 OS_BY_KEY = {o.key: o for o in ALL_OSES}
 
 
-# Shown as a warning by --plan: these combinations have not been booted on a device.
-UNTESTED = {"g350": ("arkos",), "rgb30": ("arkos",)}
+# Shown as a warning by --plan: not yet booted on a device in that boot mode
+# (G350 ini mode: ArkOS and knulli boot, tested).
+UNTESTED = {"scr-g350": ("arkos", "knulli"), "scr-rgb30": ("arkos",)}
 
 
 def osname(key: str) -> str:
@@ -1359,9 +1360,10 @@ def show_plan(c: Choices):
     print(f"U-Boot:   {os.path.basename(c.uboot_img)} (always needed{note})")
     if c.bootmode == "scr-g350" and c.sel("mustardos"):
         print("WARNING:  MustardOS has not been tested with the ROCKNIX U-Boot (needed for ROCKNIX).")
-    untested = [osname(o) for o in UNTESTED.get(c.device.key, ()) if c.sel(o)]
+    untested = [osname(o) for o in UNTESTED.get(c.bootmode, ()) if c.sel(o)]
     if untested:
-        print(f"WARNING:  not tested on a {c.device.name} yet: {', '.join(untested)}.")
+        uboot = " with the ROCKNIX U-Boot" if c.bootmode == "scr-g350" else ""
+        print(f"WARNING:  not tested on a {c.device.name}{uboot} yet: {', '.join(untested)}.")
     print(f"Keys:     no key = {osname(c.default)}")
     for i, os_key in enumerate(c.key_os):
         print(f"          {KEY_NAMES[i]} (pin {c.device.key_pins[i]}) = {osname(os_key)}")

@@ -90,8 +90,8 @@ Vol- AmberELEC, Vol+ MustardOS.
   (`ArkOS.fstab`) and its BOOT/ROMS are labelled `ARKBOOT`/`ARKROMS`, because dArkOS
   mounts `LABEL=BOOT`/`LABEL=EASYROMS`. The G350 build is the RG351MP image; its dtb drives
   the G350 panel wrong (white/yellow screen, tested), so it boots with dArkOS's
-  `rk3326-g350-linux.dtb`, copied from the dArkOS image (`copy_from_darkos_boot`). Untested
-  with that dtb.
+  `rk3326-g350-linux.dtb`, copied from the dArkOS image (`copy_from_darkos_boot`). Boots
+  on a G350 with that dtb in `ini` mode (tested); `scr-g350` and the RGB30 are untested.
 - **U-Boot `dev:part` numbers are hex** (both U-Boots). MustardOS can be p11–p13, so
   the boot commands use `@BOOTX@` (`hx(n)`), in the `boot` dicts and the templates.
 - **ROCKNIX on the G350 boots by filesystem UUID** (`RNX_BOOT_UUID`/`RNX_STOR_UUID`,
