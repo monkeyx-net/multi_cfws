@@ -305,9 +305,47 @@ Its `--plan` output is byte-identical to the bash script's for every OS combinat
 and the two scripts leave the same files on a simulated card. It has not flashed a
 real card yet, so the bash script stays the reference until it has, on both devices.
 
+### Installing the tools
+
 Requires: `sfdisk wipefs e2fsprogs btrfs-progs exfatprogs tar dd`, plus
 `dosfstools` (`mkfs.vfat`) when AmberELEC is not selected, and `squashfs-tools`
-(`unsquashfs`) with ROCKNIX. RGB30 also needs `uboot-tools` (`mkimage`).
+(`unsquashfs`) with ROCKNIX. The RGB30, and the G350 with ROCKNIX, also need
+`uboot-tools` (`mkimage`). The script checks for the tools it needs before it
+touches the card. The commands below install everything for every combination,
+plus Python 3 for `flash-dualboot.py`.
+
+Ubuntu / Debian (Ubuntu 22.04 or newer, for `exfatprogs`):
+
+```sh
+sudo apt update
+sudo apt install fdisk util-linux e2fsprogs btrfs-progs exfatprogs dosfstools \
+  squashfs-tools u-boot-tools parted udev eject tar coreutils python3
+```
+
+Arch Linux:
+
+```sh
+sudo pacman -Syu --needed util-linux e2fsprogs btrfs-progs exfatprogs dosfstools \
+  squashfs-tools uboot-tools parted systemd tar coreutils python
+```
+
+| Tool | Ubuntu package | Arch package |
+| --- | --- | --- |
+| `sfdisk` | `fdisk` | `util-linux` |
+| `wipefs`, `blockdev`, `lsblk`, `findmnt`, `mount` | `util-linux` | `util-linux` |
+| `eject` | `eject` | `util-linux` |
+| `e2fsck`, `resize2fs`, `debugfs`, `dumpe2fs` | `e2fsprogs` | `e2fsprogs` |
+| `btrfs` | `btrfs-progs` | `btrfs-progs` |
+| `mkfs.exfat` | `exfatprogs` | `exfatprogs` |
+| `mkfs.vfat` | `dosfstools` | `dosfstools` |
+| `unsquashfs` | `squashfs-tools` | `squashfs-tools` |
+| `mkimage` | `u-boot-tools` | `uboot-tools` |
+| `partprobe` | `parted` | `parted` |
+| `udevadm` | `udev` | `systemd` |
+| `dd`, `tar` | `coreutils`, `tar` | `coreutils`, `tar` |
+
+Most of these are already installed on a desktop system; the ones usually missing
+are `btrfs-progs`, `exfatprogs`, `squashfs-tools` and `u-boot-tools`.
 
 ## Files
 
