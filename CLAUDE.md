@@ -8,6 +8,14 @@ G350 boot.ini templates. Per-device values sit in one `case $DEVICE` block near 
 top; the G350 and RGB30 layouts are `layout_g350` / `layout_rgb30`. `README.md` is the
 user-facing documentation; keep it in sync when the layout, CLI or key mapping change.
 
+`src/flash-dualboot.py` is a Python port (stdlib only, Python 3.8+) that is being
+tested alongside the bash script: one class per OS (`AmberELEC`, `DarkOS`,
+`MustardOS`, `Knulli`, `Rocknix`) holds its boot commands (`boot` dict per boot mode,
+`@BOOTX@`/`@ROOT@`/`@ROOT_PU@`/`@DTB@` placeholders) and its run steps; partition numbers
+are `c.n("DRK_BOOT")` etc. Until the bash script is retired, make every change in both,
+and check that `--plan` output stays byte-identical between them for every combination
+below (`diff <(bash src/flash-dualboot.sh ARGS) <(python3 src/flash-dualboot.py ARGS)`).
+
 ## Testing without a card
 
 The real run needs root, the three images and the ~62.5GB card, and it erases the
@@ -120,7 +128,8 @@ the GPT layout below then replaced that).
   and `@ROOT2@` (hex, two digits), filled in by `render`. They go on each OS's own
   BOOT partition; U-Boot never reads them.
 - If you change boot commands, change them in the `branch_<os>` function, the
-  `sbranch_<os>` function (G350 with ROCKNIX) **and** the matching template.
+  `sbranch_<os>` function (G350 with ROCKNIX), the OS class's `boot` dict in
+  `flash-dualboot.py` **and** the matching template.
 - Hardware debugging without a serial console: in a test boot.scr, `env export -t <addr>
   <vars>` then `fatwrite ${devtype} ${devnum}:1 <addr> log.txt ${filesize}` writes
   variables to p1 (works on the mainline U-Boots; `env export` failed on the Hardkernel

@@ -291,6 +291,20 @@ sudo IMGDIR=/path/to/images bash src/flash-dualboot.sh --os darkos,mustardos /de
 The script checks that the device is about 58GiB and is not the system disk, asks
 you to type `YES`, then does everything, verifies the result and ejects the card.
 
+### Python version (being tested)
+
+`src/flash-dualboot.py` does the same job with the same options. It needs Python 3.8 or
+newer, standard library only:
+
+```sh
+sudo python3 src/flash-dualboot.py --os amberelec,darkos,mustardos /dev/sdb
+python3 src/flash-dualboot.py --plan --os darkos,mustardos
+```
+
+Its `--plan` output is byte-identical to the bash script's for every OS combination,
+and the two scripts leave the same files on a simulated card. It has not flashed a
+real card yet, so the bash script stays the reference until it has, on both devices.
+
 Requires: `sfdisk wipefs e2fsprogs btrfs-progs exfatprogs tar dd`, plus
 `dosfstools` (`mkfs.vfat`) when AmberELEC is not selected, and `squashfs-tools`
 (`unsquashfs`) with ROCKNIX. RGB30 also needs `uboot-tools` (`mkimage`).
@@ -298,6 +312,7 @@ Requires: `sfdisk wipefs e2fsprogs btrfs-progs exfatprogs tar dd`, plus
 ## Files
 
 - `src/flash-dualboot.sh`: builds the card
+- `src/flash-dualboot.py`: the same in Python (see Usage), one class per OS
 - `src/boot.ini.generated` (not in git): the shared boot script from the last run,
   installed on p1 as `boot.ini` and `boot.ini.dualboot`
 - `src/boot.cmd.generated` (not in git): the RGB30 boot script source from the last

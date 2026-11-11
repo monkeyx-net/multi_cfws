@@ -8,3 +8,4 @@
 !/img/.gitkeep
 boot.ini.generated
 boot.cmd.generated
+__pycache__/
