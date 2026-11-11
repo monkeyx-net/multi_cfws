@@ -171,6 +171,7 @@ else
       [[ -f $HERE/$f ]] || die "missing $HERE/$f"
     done
   fi
+  [[ $BOOTMODE == ini || -f $HERE/multiboot-next ]] || die "missing $HERE/multiboot-next"
   tools=(sfdisk wipefs mkfs.exfat blkid partprobe)
   if [[ $DEVICE == g350 ]]; then
     sel amberelec && tools+=(e2fsck resize2fs debugfs dumpe2fs)
@@ -507,6 +508,12 @@ gen_branches() {
     if (( i == 0 )); then echo "if $cond; then"; else echo "elif $cond; then"; fi
     branch "${KEY_OS[$i]}"
   done
+  if [[ $BOOTMODE == scr-* ]]; then        # one-shot request from multiboot-next (no key held)
+    for i in "${!KEY_OS[@]}"; do
+      echo "elif test \"\${next}\" = \"${KEY_OS[$i]}\"; then"
+      branch "${KEY_OS[$i]}"
+    done
+  fi
   echo "else"
   branch "$DEFAULT"
   echo "fi"
@@ -540,6 +547,56 @@ gen_boot_ini() {
   gen_branches
 }
 
+# One-shot "boot OS next": multiboot-next writes next=<os> to nextboot.txt on the
+# boot selector partition; boot.scr reads it, clears it (fatwrite "next=" + newline)
+# and boots that OS unless a key is held. Not in boot.ini mode (needs fatwrite).
+NEXT_FILE=nextboot.txt
+gen_next() {
+  local b; b=$(hx "$BOOTSEL_N")
+  cat <<EOF
+# One-shot boot request: multiboot-next (installed on each OS) writes next=<os> to
+# $NEXT_FILE on this partition. It is read and cleared here, before booting; a held
+# key still wins. The file is only rewritten when it held a request.
+setenv next
+if load \${devtype} \${devnum}:$b 0x30001000 $NEXT_FILE; then
+  env import -t 0x30001000 \${filesize} next
+  if test -n "\${next}"; then
+    mw.b 0x30002000 0x6e 1
+    mw.b 0x30002001 0x65 1
+    mw.b 0x30002002 0x78 1
+    mw.b 0x30002003 0x74 1
+    mw.b 0x30002004 0x3d 1
+    mw.b 0x30002005 0x0a 1
+    fatwrite \${devtype} \${devnum}:$b 0x30002000 $NEXT_FILE 6
+  fi
+fi
+
+EOF
+}
+
+# Where multiboot-next is installed on each OS (a writable place on its own partitions).
+next_path() {
+  case $1 in
+    amberelec|rocknix) echo /storage/bin/multiboot-next ;;
+    darkos|mustardos)  echo /usr/local/bin/multiboot-next ;;
+    knulli)            echo /userdata/multiboot-next ;;
+  esac
+}
+gen_next_helper() {  # src/multiboot-next with this card's values
+  local at=440 id=${DISKID#0x}
+  [[ $DEVICE == rgb30 ]] && at=568                 # GPT: disk GUID in the header at LBA 1
+  sed -e "s/@DEVICE@/$(devname)/g" -e "s/@OSES@/${USER_OS[*]}/g" -e "s/@PARTUUID@/$(pu "$BOOTSEL_N")/g" \
+      -e "s/@PARTNUM@/$BOOTSEL_N/g" -e "s/@DISKID_AT@/$at/g" \
+      -e "s/@DISKID_HEX@/${id:6:2}${id:4:2}${id:2:2}${id:0:2}/g" "$HERE/multiboot-next"
+}
+install_next() {  # os mountpoint path-under-it
+  local dst=$2/${3#/}
+  mkdir -p "$(dirname "$dst")"
+  gen_next_helper > "$dst"
+  chmod 755 "$dst" 2>/dev/null || true             # exFAT (knulli /userdata) has no modes: run it with sh
+  echo "--- multiboot-next for $(osname "$1"): $(next_path "$1")"
+}
+
 gen_boot_cmd() {
   local l oslist
   oslist=$(IFS=,; echo "${USER_OS[*]}")
@@ -566,6 +623,7 @@ setenv key none
 if itest.b *0x30000000 < 0x80; then setenv key volplus; elif itest.b *0x30000001 == 0xfe || itest.b *0x30000001 == 0x7e; then setenv key volminus; fi
 
 EOF
+  gen_next
   gen_branches
 }
 
@@ -601,6 +659,7 @@ setenv key none
 if itest ${volup_bit} == 0; then setenv key volplus; elif itest ${voldn_bit} == 0; then setenv key volminus; fi
 
 EOF
+  gen_next
   gen_branches
 }
 
@@ -634,6 +693,10 @@ show_plan() {
   fi
   echo "Keys:     no key = $(osname "$DEFAULT")"
   for i in "${!KEY_OS[@]}"; do echo "          ${KEY_NAME[$i]} (pin ${KEY_PIN[$i]}) = $(osname "${KEY_OS[$i]}")"; done
+  if [[ $BOOTMODE == scr-* ]]; then
+    echo "Next:     multiboot-next OS boots OS once ($NEXT_FILE on p$BOOTSEL_N; a held key wins)"
+    for i in "${USER_OS[@]}"; do echo "          $(osname "$i"): $(next_path "$i")"; done
+  fi
   echo "Partitions on $DEV ($(hsize "$TOTAL")):"
   printf '  %s\n' "${LAYOUT[@]}"
   if [[ $DEVICE == g350 ]]; then
@@ -666,13 +729,16 @@ if (( PLAN )); then
   else
     echo; echo "---- boot.cmd (p1, compiled to boot.scr)"; echo "$BOOT_CFG"
   fi
+  if [[ $BOOTMODE == scr-* ]]; then
+    echo; echo "---- multiboot-next (installed on each OS)"; gen_next_helper
+  fi
   exit 0
 fi
 
 MNT=$(mktemp -d /tmp/g350dual.XXXX)
 cleanup() { set +e; for d in "$MNT"/*; do mountpoint -q "$d" && umount "$d"; done; rm -rf "$MNT"; }
 trap cleanup EXIT
-mkdir -p "$MNT"/{p1,drkimg,root,boot,roms,muroot,muboot,knboot,rnboot,rnstor,rnsys}
+mkdir -p "$MNT"/{p1,drkimg,root,boot,roms,muroot,muboot,knboot,knshare,rnboot,rnstor,rnsys,ambstor}
 
 lsblk -o NAME,SIZE,FSTYPE,LABEL,MODEL,TRAN "$DEV"
 echo
@@ -737,6 +803,12 @@ grow_storage() {  # partition number
 if sel amberelec; then
   log "AmberELEC STORAGE: fsck + grow to 8G + remove .please_resize_me"
   grow_storage "$AMB_STOR_N"
+  if [[ $BOOTMODE != ini ]]; then
+    mount -t ext4 "$(p "$AMB_STOR_N")" "$MNT/ambstor"                          # /storage
+    install_next amberelec "$MNT/ambstor" "$(next_path amberelec | sed 's|^/storage||')"
+    sync
+    umount "$MNT/ambstor"
+  fi
 fi
 if sel rocknix; then
   log "ROCKNIX STORAGE: fsck + grow to 8G + remove .please_resize_me"
@@ -823,6 +895,7 @@ if sel darkos; then
     render "$HERE/boot.ini.darkos" "$DRK_BOOT_N" "$DRK_ROOT_N" > "$MNT/boot/boot.ini"
   fi
   echo "--- dArkOS /etc/fstab:"; cat "$MNT/root/etc/fstab"
+  [[ $BOOTMODE == ini ]] || install_next darkos "$MNT/root" "$(next_path darkos)"
   sync
   umount "$MNT/roms" "$MNT/boot" "$MNT/root"
 fi
@@ -846,6 +919,7 @@ if sel mustardos; then
   echo "--- patched reset.sh lines:"; grep -n '^[[:space:]]*: #' "$RESET"
   cp -f "$MNT/muboot/boot.ini" "$MNT/muboot/boot.ini.orig"
   render "$HERE/boot.ini.mustardos" "$MUS_BOOT_N" "$MUS_ROOT_N" > "$MNT/muboot/boot.ini"   # reference only; U-Boot reads p1
+  [[ $BOOTMODE == ini ]] || install_next mustardos "$MNT/muroot" "$(next_path mustardos)"
   sync
   umount "$MNT/muboot" "$MNT/muroot"
 fi
@@ -864,6 +938,10 @@ if sel knulli; then
   grep -n 'autoresize' "$KCONF"
   sync
   umount "$MNT/knboot"
+  mount -t exfat "$(p "$KNU_SHARE_N")" "$MNT/knshare"                          # /userdata
+  install_next knulli "$MNT/knshare" "$(next_path knulli | sed 's|^/userdata||')"
+  sync
+  umount "$MNT/knshare"
 fi
 
 # ---------------------------------------------------------------- 7. ROCKNIX prep
@@ -893,6 +971,7 @@ if sel rocknix; then
     rnx_extlinux > "$MNT/rnboot/extlinux/extlinux.conf.dualboot"
     echo "--- ROCKNIX extlinux.conf.dualboot:"; cat "$MNT/rnboot/extlinux/extlinux.conf.dualboot"
   fi
+  install_next rocknix "$MNT/rnstor" "$(next_path rocknix | sed 's|^/storage||')"   # /storage
   sync
   umount "$MNT/rnstor" "$MNT/rnboot"
 fi

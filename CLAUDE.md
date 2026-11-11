@@ -119,6 +119,19 @@ the GPT layout below then replaced that).
 - Partition-number variables: `KNU_BOOT_N KNU_SHARE_N RNX_BOOT_N RNX_STOR_N RNX_ROMS_N
   BOOTSEL_N` plus the shared `DRK_*_N`.
 
+## One-shot next boot (`multiboot-next`)
+
+- Only in the `boot.scr` modes (`scr-g350`, `scr-rgb30`); `ini` mode is unchanged until
+  the Hardkernel U-Boot is shown to have `fatwrite` and `env import`.
+- `src/multiboot-next` is a POSIX sh template (`@OSES@ @PARTUUID@ @PARTNUM@ @DISKID_AT@
+  @DISKID_HEX@ @DEVICE@`), filled by `gen_next_helper` / `next_helper` and installed by
+  `install_next` at `next_path <os>` (`NEXT_PATHS` in Python). It writes `next=<os>` to
+  `nextboot.txt` on `BOOTSEL_N`.
+- `boot.cmd` (`gen_next` / `next_block`): after the keys are read, it loads the file with
+  `env import -t ... next`, clears it with `fatwrite` (6 bytes `next=\n`, only when it held a
+  request), and the branches test `${next}` after the key branches, so a held key wins.
+- Not yet tested on a device.
+
 ## boot.ini files
 
 - The shared p1 boot.ini is generated (`gen_boot_ini`, `branch_<os>` functions).

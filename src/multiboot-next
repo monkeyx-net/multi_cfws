@@ -1,0 +1,77 @@
+#!/bin/sh
+# multiboot-next: boot another OS of this multi-boot card once, on the next restart.
+# Installed by flash-dualboot.sh (@DEVICE@ card: @OSES@).
+# It writes "next=OS" to nextboot.txt on the boot selector partition (p@PARTNUM@,
+# PARTUUID @PARTUUID@). The shared boot.scr reads it, clears it and boots that OS;
+# a volume key held at power-on still wins. It does not reboot: run "reboot" after it.
+#   multiboot-next OS        boot OS once (OS: @OSES@)
+#   multiboot-next --clear   forget a pending request
+#   multiboot-next --show    print the pending request (nothing if none)
+# Needs root. Exit status: 0 done, 1 error, 2 usage.
+set -eu
+
+OSES="@OSES@"
+PARTUUID=@PARTUUID@
+PARTNUM=@PARTNUM@
+DISKID_AT=@DISKID_AT@      # byte offset of the disk ID (MBR 440, GPT header 568)
+DISKID_HEX=@DISKID_HEX@   # its first 4 bytes as stored on disk
+
+die() { echo "multiboot-next: $*" >&2; exit 1; }
+usage() { sed -n '7,9s/^# \{0,1\}//p' "$0" >&2; exit 2; }
+
+find_part() {  # prints the boot selector partition's device node
+  if [ -e "/dev/disk/by-partuuid/$PARTUUID" ]; then
+    readlink -f "/dev/disk/by-partuuid/$PARTUUID"; return 0
+  fi
+  # No udev links (e.g. busybox systems): look for the disk ID on each SD/eMMC disk.
+  for d in /dev/mmcblk[0-9]; do
+    [ -b "$d" ] || continue
+    id=$(dd if="$d" bs=1 skip="$DISKID_AT" count=4 2>/dev/null | od -An -tx1 | tr -d ' \n')
+    if [ "$id" = "$DISKID_HEX" ] && [ -b "${d}p$PARTNUM" ]; then echo "${d}p$PARTNUM"; return 0; fi
+  done
+  return 1
+}
+
+[ $# -eq 1 ] || usage
+case $1 in
+  -h|--help) usage ;;
+  --clear) value= ;;
+  --show) value=SHOW ;;
+  -*) usage ;;
+  *)
+    value=$(echo "$1" | tr 'A-Z' 'a-z')
+    case " $OSES " in *" $value "*) ;; *) die "unknown OS '$1' (choose from: $OSES)" ;; esac
+    ;;
+esac
+
+[ "$(id -u)" = 0 ] || die "run as root"
+dev=$(find_part) || die "boot selector partition (PARTUUID $PARTUUID) not found"
+
+# Use the partition where it is mounted (remounting it read-write if needed, as
+# AmberELEC's /flash is), or mount it on a temporary directory.
+mnt=$(awk -v d="$dev" '$1 == d { print $2; exit }' /proc/mounts)
+opts=$(awk -v d="$dev" '$1 == d { print $4; exit }' /proc/mounts)
+tmp=
+remount=
+cleanup() {
+  if [ -n "$remount" ]; then mount -o remount,ro "$mnt" || true; fi
+  if [ -n "$tmp" ]; then umount "$tmp" 2>/dev/null || true; rmdir "$tmp" 2>/dev/null || true; fi
+}
+trap cleanup EXIT
+if [ -z "$mnt" ]; then
+  tmp=$(mktemp -d /tmp/multiboot-next.XXXXXX)
+  mount -t vfat "$dev" "$tmp" || die "cannot mount $dev"
+  mnt=$tmp
+elif [ "$value" != SHOW ]; then
+  case ",$opts," in
+    *,ro,*) mount -o remount,rw "$mnt" || die "cannot remount $mnt read-write"; remount=1 ;;
+  esac
+fi
+
+if [ "$value" = SHOW ]; then
+  [ -f "$mnt/nextboot.txt" ] && sed -n 's/^next=//p' "$mnt/nextboot.txt"
+  exit 0
+fi
+printf 'next=%s\n' "$value" > "$mnt/nextboot.txt"
+sync
+if [ -n "$value" ]; then echo "next boot: $value"; else echo "next boot: normal"; fi

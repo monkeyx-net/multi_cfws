@@ -602,6 +602,9 @@ class AmberELEC(OS):
     def fix_fs(self, c):
         log("AmberELEC STORAGE: fsck + grow to 8G + remove .please_resize_me")
         grow_storage(c.part("AMB_STOR"))
+        if c.bootmode != "ini":
+            with mounted(c, c.part("AMB_STOR"), "ext4", "ambstor") as stor:   # /storage
+                install_next(c, "amberelec", stor)
 
     def verify(self, c):
         check_label(c, "AMB_ROMS", "GAMES")
@@ -693,6 +696,8 @@ class DarkOS(OS):
                 write(f"{boot}/boot.ini", render(c, "darkos"))
             print("--- dArkOS /etc/fstab:")
             print(read(f"{root}/etc/fstab"), end="")
+            if c.bootmode != "ini":
+                install_next(c, "darkos", root)
 
     def verify(self, c):
         check_label(c, "DRK_ROMS", "EASYROMS")
@@ -769,6 +774,8 @@ class MustardOS(OS):
 
             shutil.copyfile(f"{boot}/boot.ini", f"{boot}/boot.ini.orig")
             write(f"{boot}/boot.ini", render(c, "mustardos"))   # reference only; U-Boot reads p1
+            if c.bootmode != "ini":
+                install_next(c, "mustardos", root)
 
     def verify(self, c):
         check_label(c, "MUS_ROM", "ROMS")
@@ -813,6 +820,8 @@ class Knulli(OS):
             if re.search(r"(?m)^ *format-internal *=", text):
                 die("format-internal is set in knulli-boot.conf")
             print("\n".join(grep_n(conf, "autoresize")))
+        with mounted(c, c.part("KNU_SHARE"), "exfat", "knshare") as share:   # /userdata
+            install_next(c, "knulli", share)
 
     def verify(self, c):
         check_label(c, "KNU_BOOT", "KNULLI")
@@ -900,6 +909,7 @@ LABEL ROCKNIX
                 write(conf, self.extlinux(c))
                 print("--- ROCKNIX extlinux.conf.dualboot:")
                 print(read(conf), end="")
+            install_next(c, "rocknix", stor)                 # /storage
 
     def verify(self, c):
         check_label(c, "RNX_BOOT", "ROCKNIX")
@@ -934,6 +944,48 @@ def render(c: Choices, os_key: str) -> str:
     return fill(read(path), BOOT=boot, BOOTX=hx(boot), ROOT=root, ROOT2=f"{root:02x}")
 
 
+# One-shot "boot OS next" (boot.scr modes only; boot.ini mode would need fatwrite):
+# multiboot-next writes next=<os> to NEXT_FILE on the boot selector partition, and
+# boot.scr reads it, clears it (fatwrite "next=" + newline) and boots that OS unless
+# a key is held.
+NEXT_FILE = "nextboot.txt"
+NEXT_PATHS = {  # where multiboot-next is installed on each OS: (mount, path under it)
+    "amberelec": ("/storage", "/bin/multiboot-next"),
+    "darkos": ("", "/usr/local/bin/multiboot-next"),
+    "mustardos": ("", "/usr/local/bin/multiboot-next"),
+    "knulli": ("/userdata", "/multiboot-next"),
+    "rocknix": ("/storage", "/bin/multiboot-next"),
+}
+
+
+def next_path(os_key: str) -> str:
+    return "".join(NEXT_PATHS[os_key])
+
+
+def next_helper(c: Choices) -> str:
+    """src/multiboot-next with this card's values."""
+    bootsel = c.n("BOOTSEL")
+    path = f"{HERE}/multiboot-next"
+    if not os.path.isfile(path):
+        die(f"missing {path}")
+    return fill(read(path), DEVICE=c.device.name, OSES=" ".join(c.user_os),
+                PARTUUID=c.partuuid(bootsel), PARTNUM=bootsel,
+                DISKID_AT=568 if c.device.key == "rgb30" else 440,   # GPT: disk GUID in the header
+                DISKID_HEX=bytes.fromhex(DISKID)[::-1].hex())          # as stored (little endian)
+
+
+def install_next(c: Choices, os_key: str, mountpoint: str):
+    """Write multiboot-next onto an OS partition mounted at mountpoint."""
+    dst = mountpoint + NEXT_PATHS[os_key][1]
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    write(dst, next_helper(c))
+    try:
+        os.chmod(dst, 0o755)
+    except OSError:
+        pass                    # exFAT (knulli /userdata) has no modes: run it with sh
+    print(f"--- multiboot-next for {osname(os_key)}: {next_path(os_key)}")
+
+
 # ============================================================================ 5. boot script
 def boot_title(c: Choices) -> str:
     title = f"{osname(c.default)} (no key)"
@@ -951,7 +1003,34 @@ def boot_branches(c: Choices) -> str:
         else:
             cond = f'test "${{key}}" = "{KEY_VARS[i]}"'
         text += f"{'if' if i == 0 else 'elif'} {cond}; then\n" + OS_BY_KEY[os_key].branch(c)
+    if c.bootmode != "ini":                  # one-shot request from multiboot-next (no key held)
+        for os_key in c.key_os:
+            text += f'elif test "${{next}}" = "{os_key}"; then\n' + OS_BY_KEY[os_key].branch(c)
     return text + "else\n" + OS_BY_KEY[c.default].branch(c) + "fi\n"
+
+
+def next_block(c: Choices) -> str:
+    """boot.scr: read and clear a one-shot request into ${next}."""
+    b = hx(c.n("BOOTSEL"))
+    return f"""\
+# One-shot boot request: multiboot-next (installed on each OS) writes next=<os> to
+# {NEXT_FILE} on this partition. It is read and cleared here, before booting; a held
+# key still wins. The file is only rewritten when it held a request.
+setenv next
+if load ${{devtype}} ${{devnum}}:{b} 0x30001000 {NEXT_FILE}; then
+  env import -t 0x30001000 ${{filesize}} next
+  if test -n "${{next}}"; then
+    mw.b 0x30002000 0x6e 1
+    mw.b 0x30002001 0x65 1
+    mw.b 0x30002002 0x78 1
+    mw.b 0x30002003 0x74 1
+    mw.b 0x30002004 0x3d 1
+    mw.b 0x30002005 0x0a 1
+    fatwrite ${{devtype}} ${{devnum}}:{b} 0x30002000 {NEXT_FILE} 6
+  fi
+fi
+
+"""
 
 
 def layout_comment(c: Choices) -> list:
@@ -1008,7 +1087,7 @@ def boot_cmd_g350(c: Choices) -> str:
         "#",
         *layout_comment(c),
     ]
-    return "\n".join(lines) + "\n" + KEYS_G350 + boot_branches(c)
+    return "\n".join(lines) + "\n" + KEYS_G350 + next_block(c) + boot_branches(c)
 
 
 # RGB30, knulli's U-Boot (no gpio, no setexpr): compare register bytes copied to RAM.
@@ -1038,7 +1117,7 @@ def boot_cmd_rgb30(c: Choices) -> str:
         "#",
         *layout_comment(c),
     ]
-    return "\n".join(lines) + "\n" + KEYS_RGB30 + boot_branches(c)
+    return "\n".join(lines) + "\n" + KEYS_RGB30 + next_block(c) + boot_branches(c)
 
 
 def boot_config(c: Choices) -> str:
@@ -1072,6 +1151,10 @@ def show_plan(c: Choices):
     print(f"Keys:     no key = {osname(c.default)}")
     for i, os_key in enumerate(c.key_os):
         print(f"          {KEY_NAMES[i]} (pin {c.device.key_pins[i]}) = {osname(os_key)}")
+    if c.bootmode != "ini":
+        print(f"Next:     multiboot-next OS boots OS once ({NEXT_FILE} on p{c.n('BOOTSEL')}; a held key wins)")
+        for os_key in c.user_os:
+            print(f"          {osname(os_key)}: {next_path(os_key)}")
     print(f"Partitions on {c.dev} ({hsize(c.total)}):")
     for p in c.lay.parts:
         print(f"  {p.line()}")
@@ -1105,6 +1188,9 @@ def print_plan(c: Choices, boot_cfg: str):
         if c.sel("mustardos"):
             print(f"\n---- MustardOS /boot.ini (p{c.n('MUS_BOOT')})")
             print(render(c, "mustardos"), end="")
+    if c.bootmode != "ini":
+        print("\n---- multiboot-next (installed on each OS)")
+        print(next_helper(c), end="")
 
 
 # ============================================================================ 7. flash
@@ -1217,6 +1303,8 @@ def preflight(c: Choices):
         for o in ("darkos", "mustardos"):
             if c.sel(o) and not os.path.isfile(f"{HERE}/boot.ini.{o}"):
                 die(f"missing {HERE}/boot.ini.{o}")
+    if c.bootmode != "ini" and not os.path.isfile(f"{HERE}/multiboot-next"):
+        die(f"missing {HERE}/multiboot-next")
 
     tools = ["sfdisk", "wipefs", "mkfs.exfat", "blkid", "partprobe"]
     if c.device.key == "g350":

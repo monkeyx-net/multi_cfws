@@ -36,6 +36,39 @@ In general, the `--default` OS boots with no key held. The other selected OSes,
 in the fixed order AmberELEC, dArkOS, MustardOS, ROCKNIX, get Vol- and then Vol+. The
 script prints the mapping before it asks for confirmation.
 
+### Booting another OS once (`multiboot-next`)
+
+On the RGB30, and on the G350 with ROCKNIX, a script running in one OS can pick the
+OS for the next boot only, without a key:
+
+```sh
+multiboot-next rocknix && reboot      # boots ROCKNIX once, then back to normal
+multiboot-next --show                 # pending request (prints nothing if none)
+multiboot-next --clear                # cancel it
+```
+
+It needs root and does not reboot by itself. The OS names are the `--os` names. The
+script installs it on every OS of the card, here (`--plan` prints the list too):
+
+| OS | Path |
+|---|---|
+| dArkOS, MustardOS | `/usr/local/bin/multiboot-next` |
+| AmberELEC, ROCKNIX | `/storage/bin/multiboot-next` |
+| knulli | `/userdata/multiboot-next` (exFAT: run it with `sh /userdata/multiboot-next`) |
+
+How it works: it writes `next=<os>` (one line, LF) to `nextboot.txt` on the partition
+holding `boot.scr` (p1 on the G350, `BOOTSEL` on the RGB30), which it finds by its fixed
+PARTUUID (or by the disk ID when `/dev/disk/by-partuuid` is missing). If that partition is
+mounted read-only, as AmberELEC's `/flash` is, it is remounted read-write for the write
+and back to read-only. Your own tools can write the file directly instead. At power-on,
+`boot.scr` loads the file, overwrites it with `next=` (so the request is used once) and
+boots that OS. A held volume key still wins, and an empty, missing or unknown value
+gives the normal boot.
+
+Not available yet on the G350 without ROCKNIX: its old U-Boot (`boot.ini`) may lack
+`fatwrite`, which clearing the request needs. That still has to be tested on a device.
+This feature has not been tested on a device yet either.
+
 ## How it works (G350)
 
 The card uses dArkOS's Hardkernel `odroidgoa` U-Boot. It always runs `boot.ini`
@@ -286,7 +319,7 @@ sudo IMGDIR=/path/to/images bash src/flash-dualboot.sh --os darkos,mustardos /de
 - `--default`: the OS that boots with no key held. Must be one of `--os`. Default:
   dArkOS if selected, otherwise the first OS listed in `--os`.
 - `--plan`: print the key mapping, partition layout, sfdisk script and generated
-  `boot.ini` / `boot.cmd` files, then exit without touching anything. The target defaults to `/dev/sdb`.
+  `boot.ini` / `boot.cmd` files (and `multiboot-next`), then exit without touching anything. The target defaults to `/dev/sdb`.
 
 The script checks that the device is about 58GiB and is not the system disk, asks
 you to type `YES`, then does everything, verifies the result and ejects the card.
@@ -359,6 +392,8 @@ are `btrfs-progs`, `exfatprogs`, `squashfs-tools` and `u-boot-tools`.
   are filled in by the script)
 - `src/boot.ini.mustardos`: template for the MustardOS-only `boot.ini`, installed on
   MustardOS BOOT for reference
+- `src/multiboot-next`: template for the [`multiboot-next`](#booting-another-os-once-multiboot-next)
+  helper installed on each OS (`@PARTUUID@` etc. are filled in by the script)
 
 ## Notes (G350)
 
