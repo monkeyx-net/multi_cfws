@@ -50,7 +50,7 @@ case $DEVICE in
     ALL_OS=(amberelec darkos mustardos rocknix)   # fixed order: also the order keys are handed out
     KEY_PIN=(65 64)                       # Vol-, Vol+ (GPIO2_A1, GPIO2_A0)
     AMB=$IMGDIR/AmberELEC-RG351MP.aarch64-prerelease-20261019_1835.img
-    DARK=$IMGDIR/dArkOS_G350_trixie_01012026.img     # always needed: U-Boot + logo.bmp come from it
+    DARK=$IMGDIR/dArkOS_G350_trixie_11142026.img     # always needed: U-Boot + logo.bmp come from it
     MUS=$IMGDIR/MustardOS_RK-G350-V_2606.0_ANDROMEDA-db2a3bd0.img
     RNX=$IMGDIR/ROCKNIX-RK3326.aarch64-20261101-b.img
     UBOOT_IMG=$DARK; UBOOT_OS=darkos
@@ -70,7 +70,7 @@ case $DEVICE in
   rgb30)
     ALL_OS=(darkos knulli rocknix)        # fixed order: also the order keys are handed out
     KEY_PIN=(104 103)                     # Vol-, Vol+ (GPIO3_B0, GPIO3_A7)
-    DARK=$IMGDIR/dArkOS_RGB30_trixie_08282026.img
+    DARK=$IMGDIR/dArkOS_RGB30_trixie_11092026.img
     KNU=$IMGDIR/knulli-rk3568-powkiddy-rgb30-scarab-20260510.img   # always needed: U-Boot comes from it
     RNX=$IMGDIR/ROCKNIX-RK3566.aarch64-20261101-Generic.img
     UBOOT_IMG=$KNU; UBOOT_OS=knulli

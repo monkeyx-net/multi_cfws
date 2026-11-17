@@ -106,7 +106,7 @@ def g350(imgdir: str) -> Device:
         images={
             "amberelec": f"{imgdir}/AmberELEC-RG351MP.aarch64-prerelease-20261019_1835.img",
             "arkos": f"{imgdir}/ArkOS_RG351MP_v2.0_12242024.img",
-            "darkos": f"{imgdir}/dArkOS_G350_trixie_01012026.img",  # U-Boot + logo.bmp
+            "darkos": f"{imgdir}/dArkOS_G350_trixie_11142026.img",  # U-Boot + logo.bmp
             "knulli": f"{imgdir}/knulli-rk3326-g350-scarab-20260510.img",
             "mustardos": f"{imgdir}/MustardOS_RK-G350-V_2606.0_ANDROMEDA-db2a3bd0.img",
             "rocknix": f"{imgdir}/ROCKNIX-RK3326.aarch64-20261101-b.img",
@@ -142,7 +142,7 @@ def rgb30(imgdir: str) -> Device:
         key_pins=(104, 103),                     # Vol-, Vol+ (GPIO3_B0, GPIO3_A7)
         images={
             "arkos": f"{imgdir}/ArkOS_RGB30_v2.0_02092025.img",
-            "darkos": f"{imgdir}/dArkOS_RGB30_trixie_08282026.img",
+            "darkos": f"{imgdir}/dArkOS_RGB30_trixie_11092026.img",
             "knulli": f"{imgdir}/knulli-rk3568-powkiddy-rgb30-scarab-20260510.img",  # U-Boot
             "rocknix": f"{imgdir}/ROCKNIX-RK3566.aarch64-20261101-Generic.img",
         },
@@ -706,7 +706,8 @@ class DarkOS(OS):
   # dArkOS (vendor 5.10 kernel). Despite its name, uInitrd is a plain gzip initramfs
   # (no U-Boot header), so it needs :size; it is loaded last for ${filesize}.
   # Its initramfs ignores root= and always mounts /dev/mmcblk1p4 (hence dArkOS on p4).
-  setenv bootargs "root=/dev/mmcblk1p@ROOT@ initrd=/uInitrd rootwait rw fsck.repair=yes quiet splash vt.global_cursor_default=0 net.ifnames=0 console=tty1 plymouth.ignore-serial-consoles consoleblank=0 loglevel=5 video=HDMI-A-1:1280x720@60"
+  # loglevel=0, not the image's 5: kernel messages on tty1 cover the splash.
+  setenv bootargs "root=/dev/mmcblk1p@ROOT@ initrd=/uInitrd rootwait rw fsck.repair=yes quiet splash vt.global_cursor_default=0 net.ifnames=0 console=tty1 plymouth.ignore-serial-consoles consoleblank=0 loglevel=0 video=HDMI-A-1:1280x720@60"
   load ${devtype} ${devnum}:@BOOTX@ ${kernel_addr_r} /Image
   load ${devtype} ${devnum}:@BOOTX@ ${fdt_addr_r} /@DTB@
   load ${devtype} ${devnum}:@BOOTX@ ${ramdisk_addr_r} /uInitrd

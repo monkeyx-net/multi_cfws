@@ -14,7 +14,7 @@ install that OS. The script stops before touching the card if it is missing, and
 
 G350 images:
 
-- `dArkOS_G350_trixie_01012026.img`
+- `dArkOS_G350_trixie_11142026.img`
 - `AmberELEC-RG351MP.aarch64-prerelease-20261019_1835.img`
 - `MustardOS_RK-G350-V_2606.0_ANDROMEDA-db2a3bd0.img`
 - `ROCKNIX-RK3326.aarch64-20261101-b.img` (see [ROCKNIX on the G350](#rocknix-on-the-g350))
@@ -256,7 +256,7 @@ AmberELEC + MustardOS only they are p5/p6/p7.
 
 RGB30 images (also in `img/`):
 
-- `dArkOS_RGB30_trixie_08282026.img`
+- `dArkOS_RGB30_trixie_11092026.img`
 - `ArkOS_RGB30_v2.0_02092025.img` (see [ArkOS](#arkos-g350-and-rgb30))
 - `knulli-rk3568-powkiddy-rgb30-scarab-20260510.img`
 - `ROCKNIX-RK3566.aarch64-20261101-Generic.img`
@@ -288,8 +288,11 @@ TF-A). The card uses knulli's: it runs a boot script and boots all three kernels
 
 That U-Boot runs `bootflow scan` and finds `boot.scr` on `BOOTSEL`, the only partition
 marked bootable (GPT attribute `LegacyBIOSBootable`). `boot.scr` loads the chosen OS's
-kernel, dtb and initrd directly, with the bootargs from that OS's `extlinux.conf`. Its
-source is kept on `BOOTSEL` as `boot.cmd` and in `src/boot.cmd.generated`.
+kernel, dtb and initrd directly, with the bootargs from that OS's `extlinux.conf`
+(except dArkOS's `loglevel=5`, which becomes `loglevel=0` so kernel messages don't
+cover its "Welcome to dArkOS" text on tty1; knulli's U-Boot doesn't draw dArkOS's
+`logo.bmp`, so the screen stays blank until that text appears). Its source is kept on `BOOTSEL` as `boot.cmd` and in
+`src/boot.cmd.generated`.
 
 **Keys.** knulli's U-Boot was built without the `gpio` and `setexpr` commands, and
 nothing enables the pull-ups of the volume keys (Vol+ = GPIO3_A7, Vol- = GPIO3_B0,

@@ -126,6 +126,13 @@ the GPT layout below then replaced that).
 - **dArkOS must be p3/p4/p5** (BOOT, ROOTFS, EASYROMS): its initramfs hard-codes
   `/dev/mmcblk1p4` and ignores `root=`; its fstab.exfat is copied unchanged.
   `uInitrd` is a plain gzip initramfs: `booti` needs `addr:${filesize}`.
+  Its bootargs use `loglevel=0`, not its `extlinux.conf`'s `loglevel=5`: kernel
+  warnings on tty1 showed instead of its splash. dArkOS has no graphical splash: its
+  Rockchip U-Boot draws `logo.bmp` and hands it to the vendor DRM, then
+  `welcome-message.service` (`boot_text.sh`) prints "Welcome to dArkOS" on tty1.
+  knulli's U-Boot draws no logo (not fixable here), so the screen stays blank until
+  that text. Its `firstboot.sh` only runs `expandtoexfat.sh` (nothing for
+  console or splash).
 - **knulli must be p1/p2**: `knulli-part` takes the share as boot partition + 1 and
   only parses one digit. Its `autoresize` in `knulli-boot.conf` is set to false.
 - **U-Boot always comes from the knulli image** (mainline 2024.07, Rockchip BL31),
