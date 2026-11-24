@@ -4,17 +4,24 @@ Builds a multi-boot SD card with 2 or 3 OSes for one device (`--device`). `--os`
 required and must name them; there is no "all" default:
 the G350 (RK3326; dArkOS, AmberELEC, ArkOS, knulli, MustardOS, ROCKNIX; the default) or the
 RGB30 (RK3566; dArkOS, ArkOS, knulli, ROCKNIX). Everything lives in `src/`: `flash-dualboot.py` (Python 3.8+,
-standard library only), its three G350 boot.ini templates and the `multiboot-next` template.
+standard library only), one JSON file per device (`devices/`), the boot command templates
+(`boot/`), its three G350 boot.ini templates and the `multiboot-next` template.
 `README.md` is the user-facing documentation; keep it in sync when the layout, CLI or key
 mapping change.
 
 `flash-dualboot.py` reads top to bottom in the order things happen: settings, choices,
-layout, per-OS code, boot script, plan, flash. Per-device values (images, U-Boot source,
-source partitions, dtbs, key pins) sit in the `g350()` / `rgb30()` `Device` factories;
-the layouts are `layout_g350` / `layout_rgb30`. One class per OS (`AmberELEC`, `DarkOS`, `ArkOS`,
-`MustardOS`, `Knulli`, `Rocknix`) holds its boot commands (`boot` dict per boot mode,
-`@BOOTX@`/`@ROOT@`/`@ROOT_PU@`/`@DTB@` placeholders) and its run steps (`fix_fs`,
-`prepare`, `verify`); partition numbers are `c.n("DRK_BOOT")` etc.
+layout, per-OS code, boot script, plan, flash. Per-device data (images, U-Boot source
+and boot-mode rules, source partitions, dtbs, key pins, UUIDs, per-OS options) is in
+`src/devices/<device>.json`, read by `load_device` into a `Device`; keys starting with `_`
+are comments. Never test the device name in code (`device.key == ...`): use a device field
+(`table`, `boot`, `os_opts` via `c.device.opt(os, name)`, `os_boot_ini`, `uuids`, ...) or add
+one. A new device needs a JSON file and, as the partition order is code, a layout function
+in `LAYOUTS` (`layout_g350` / `layout_rgb30`), named by its `layout` field. One class per OS
+(`AmberELEC`, `DarkOS`, `ArkOS`, `MustardOS`, `Knulli`, `Rocknix`) holds its run steps
+(`fix_fs`, `prepare`, `verify`) and `tools`; its U-Boot commands are in
+`src/boot/<os>.<bootmode>.cmd` (`@BOOTX@`/`@ROOT@`/`@ROOT_PU@`/`@DTB@` placeholders) and the
+key-reading blocks in `src/boot/keys.<bootmode>.cmd`. Partition numbers are
+`c.n("DRK_BOOT")` etc.
 
 ## Testing without a card
 
@@ -65,7 +72,7 @@ Vol- AmberELEC, Vol+ MustardOS.
 - **`scr-g350` key reading (tested on a G350):** `gpio input` returns success, not the
   pin value, and the volume keys have no pull-up, so `boot.scr` sets the pull-ups
   (`mw.l 0xff140070 0x000f0005`) and reads GPIO2 EXT_PORTA (`0xff260050`, bit 0 Vol+,
-  bit 1 Vol-) with `setexpr` (`/` and `%`; a bare `&` breaks hush; `KEYS_G350`).
+  bit 1 Vol-) with `setexpr` (`/` and `%`; a bare `&` breaks hush; `boot/keys.scr-g350.cmd`).
   Vol+ is checked first. dArkOS, AmberELEC and ROCKNIX are tested with this U-Boot;
   MustardOS is not.
 - **AmberELEC must be p1/p2/p3.** Its initramfs is built into `KERNEL` (can't be
@@ -93,9 +100,10 @@ Vol- AmberELEC, Vol+ MustardOS.
   `rk3326-g350-linux.dtb`, copied from the dArkOS image (`copy_from_darkos_boot`). Boots
   on a G350 with that dtb in `ini` mode (tested); `scr-g350` and the RGB30 are untested.
 - **U-Boot `dev:part` numbers are hex** (both U-Boots). MustardOS can be p11–p13, so
-  the boot commands use `@BOOTX@` (`hx(n)`), in the `boot` dicts and the templates.
-- **ROCKNIX on the G350 boots by filesystem UUID** (`RNX_BOOT_UUID`/`RNX_STOR_UUID`,
-  in the `extlinux.conf.dualboot` the script writes on its partition, `Rocknix.EXTLINUX`;
+  the boot commands use `@BOOTX@` (`hx(n)`), in `src/boot/` and the templates.
+- **ROCKNIX on the G350 boots by filesystem UUID** (`uuids` `RNX_BOOT`/`RNX_STOR` in
+  `g350.json`, in the `extlinux.conf.dualboot` the script writes on its partition,
+  `src/boot/rocknix.extlinux.conf`;
   `sysboot` as in ROCKNIX's own boot.scr), because AmberELEC's ext4 is labelled `STORAGE`
   too. Its STORAGE resize flag is removed and `system.gamesdevice` is seeded, as on the RGB30.
 - **MustardOS ROMS must be the last partition**: its factory reset resizes that
@@ -139,7 +147,7 @@ the GPT layout below then replaced that).
   even when knulli is not installed. It runs `bootflow scan` and boots `boot.scr` from
   `BOOTSEL` (`c.n("BOOTSEL")`), the only partition with `LegacyBIOSBootable`; never put
   `extlinux.conf` on it.
-- **Keys:** that U-Boot has no `gpio` or `setexpr`. `boot.scr` (`KEYS_RGB30`) sets the
+- **Keys:** that U-Boot has no `gpio` or `setexpr`. `boot.scr` (`boot/keys.scr-rgb30.cmd`) sets the
   pull-ups with `mw.l` (SYS_GRF `0xfdc600a0`/`0xfdc600a4`), copies GPIO3 EXT_PORT
   (`0xfe760070`) to RAM with `cp.l` and compares bytes with `itest.b` (Vol+ = byte 0 <
   0x80, Vol- = byte 1 == 0xfe/0x7e). Keys: `all_os` order arkos, darkos, knulli, rocknix.
@@ -178,8 +186,8 @@ the GPT layout below then replaced that).
 - `src/boot.ini.darkos`, `src/boot.ini.arkos` and `src/boot.ini.mustardos` are templates with `@BOOT@`, `@BOOTX@` (hex), `@ROOT@`
   and `@ROOT2@` (hex, two digits), filled in by `render`. They go on each OS's own
   BOOT partition; U-Boot never reads them.
-- If you change boot commands, change them in the OS class's `boot` dict (every boot mode
-  it has) **and** in the matching template.
+- If you change boot commands, change them in `src/boot/<os>.<bootmode>.cmd` (every boot
+  mode it has) **and** in the matching template.
 - Hardware debugging without a serial console: in a test boot.scr, `env export -t <addr>
   <vars>` then `fatwrite ${devtype} ${devnum}:1 <addr> log.txt ${filesize}` writes
   variables to p1 (works on the mainline U-Boots; `env export` failed on the Hardkernel
@@ -187,10 +195,10 @@ the GPT layout below then replaced that).
 
 ## Image-specific values
 
-Image file names (`Device.images`), the source partition offsets/sizes (`Device.src`,
-`Src(start, size)` taken from `sfdisk -d <image>`; for the RGB30 dArkOS image they are its
-p3/p4) and the dtb paths (`Device.dtb`) in `g350()` / `rgb30()` are tied to specific image
+Image file names (`images`), the source partition offsets/sizes (`src`,
+`[start, size, note]` taken from `sfdisk -d <image>`; for the RGB30 dArkOS image they are its
+p3/p4) and the dtb paths (`dtb`) in `src/devices/<device>.json` are tied to specific image
 releases. When an image is updated, re-check them and the filesystem UUIDs
-(`AMB_*_UUID`, `RNX_*_UUID`) used in the boot commands and the verification step. Images
+(`uuids`: `AMB_*`, `RNX_*`) used in the boot commands and the verification step. Images
 are read from `img/` at the repo root by default (git-ignored except `img/.gitkeep`;
 override with `IMGDIR=`).

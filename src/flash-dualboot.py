@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-"""Build a multi-boot SD card for the G350 (RK3326) or the RGB30 (RK3566).
+"""Build a multi-boot SD card for one device (src/devices/<device>.json).
 
 Python version of flash-dualboot.sh: same options, same card, same --plan output.
-Standard library only. The file reads top to bottom in the order things happen:
+Standard library only. Device data (images, source partitions, dtbs, key pins, UUIDs)
+is in src/devices/*.json; each OS's U-Boot commands are in src/boot/<os>.<bootmode>.cmd.
+The file reads top to bottom in the order things happen:
 
-  1. settings      units, sizes, per-device images and source partitions
+  1. settings      units, sizes, loading the device file
   2. choices       command line -> which OSes, default OS, keys, boot mode
   3. layout        partition table (one Part per partition, no hidden state)
   4. per-OS code   one class per OS: its boot commands and every step it needs
@@ -16,6 +18,7 @@ from __future__ import annotations
 
 import glob
 import gzip
+import json
 import os
 import re
 import shutil
@@ -24,20 +27,7 @@ import subprocess
 import sys
 import tempfile
 from contextlib import contextmanager
-from dataclasses import dataclass, field
-
-USAGE = """\
-Build a multi-boot SD card for the G350 (RK3326) or the RGB30 (RK3566).
-Usage: sudo python3 src/flash-dualboot.py [--device g350|rgb30] --os LIST [--default OS] [--plan] [/dev/sdX]
-  --device   g350 (default): amberelec, arkos, darkos, knulli, mustardos, rocknix
-             rgb30: arkos, darkos, knulli, rocknix
-             Always needed (U-Boot source, even if not in --os): g350 the dArkOS image
-             (the ROCKNIX image instead when rocknix is selected), rgb30 the knulli image
-  --os       required: comma list naming 2 or 3 of the device's OSes
-  --default  OS that boots with no key held (default: darkos if selected, else the first --os entry)
-  --plan     print the partition layout, key mapping and boot script, then exit (no root, no writes)
-The target defaults to /dev/sdb. ERASES THE WHOLE TARGET DEVICE.
-"""
+from dataclasses import dataclass
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 IMGDIR = os.environ.get("IMGDIR") or os.path.dirname(HERE) + "/img"   # sudo IMGDIR=/path ...
@@ -47,7 +37,6 @@ IMGDIR = os.environ.get("IMGDIR") or os.path.dirname(HERE) + "/img"   # sudo IMG
 S = 512                          # bytes per sector; all sizes below are in sectors
 MIB = 2048
 GIB = 1024 * MIB
-P1_START = 32768                 # first partition; U-Boot sits in sectors 64-32767
 GAP = 2048                       # MBR: gap before each logical partition
 PLAN_TOTAL = 122070312           # --plan without a readable card: ~62.5GB
 DISKID = "5a3c9e71"              # MBR disk ID; root=PARTUUID=5a3c9e71-NN
@@ -60,12 +49,6 @@ DRK_BOOT_SIZE = 100 * MIB
 DRK_ROOT_SIZE = 12 * GIB
 ARK_ROOT_SIZE = 12 * GIB         # ArkOS's own first boot grows its ext4 to ~11GB
 # MustardOS BOOT/ROOTFS, knulli KNULLI and ROCKNIX's FAT partition keep their image size.
-
-# Filesystem UUIDs inside the images (checked after flashing; ROCKNIX boots by them).
-AMB_BOOT_UUID = "1910-5621"
-AMB_STOR_UUID = "7ab6cd9f-77f8-4d13-905e-aa8fc5baa800"
-RNX_BOOT_UUID = "0111-5938"                              # G350 image
-RNX_STOR_UUID = "b4434352-b41f-4bef-a8d9-d81a710453da"   # G350 image
 
 # ArkOS's BOOT and ROMS are relabelled: dArkOS mounts LABEL=BOOT and LABEL=EASYROMS,
 # which ArkOS's partitions would also carry. ArkOS itself mounts by PARTUUID (its fstab
@@ -86,86 +69,77 @@ class Src:
 
 @dataclass
 class Device:
-    key: str                     # g350 / rgb30
+    """One device, read from src/devices/<key>.json. Everything tied to the device's
+    images (file names, offsets, dtbs, UUIDs) lives there; see load_device for the fields."""
+    key: str                     # file name: g350 / rgb30
     name: str                    # G350 / RGB30
+    soc: str
     all_os: tuple                # fixed order: also the order keys are handed out
     key_pins: tuple              # Vol-, Vol+ GPIO numbers
-    images: dict                 # os -> image file
-    uboot_os: str                # U-Boot comes from this OS's image (see Choices.bootmode)
-    src: dict                    # os -> partitions copied from its image, in order
-    dtb: dict = field(default_factory=dict)
+    table: str                   # mbr / gpt
+    layout: str                  # LAYOUTS key: which layout function builds the card
+    uboot_sectors: tuple         # raw U-Boot area copied from the U-Boot image: [first, end)
+    boot: tuple                  # rules {"if": os, "bootmode", "uboot_os"}: first match wins
+    images: dict                 # os -> image file (full path)
+    src: dict                    # os -> partitions copied from its image, in order (Src)
+    dtb: dict                    # os -> dtb path on its boot partition
+    uuids: dict                  # role -> filesystem UUID inside the image
+    os_opts: dict                # os -> {setting: value} for this device's image of it
+    os_boot_ini: tuple           # OSes whose BOOT gets src/boot.ini.<os>
+    unique_labels: tuple         # labels that must not appear twice on the card
+    numbers: tuple               # role groups on the --plan "Numbers:" line
+    untested: dict               # bootmode -> OSes not yet booted that way
+
+    @property
+    def gpt(self) -> bool:
+        return self.table == "gpt"
+
+    def opt(self, os_key: str, name: str, default=None):
+        return self.os_opts.get(os_key, {}).get(name, default)
 
 
-# Image names, offsets and dtb paths are tied to specific image releases: re-check
-# them (sfdisk -d <image>) and the UUIDs above when an image is updated.
-def g350(imgdir: str) -> Device:
-    return Device(
-        key="g350", name="G350",
-        all_os=("amberelec", "arkos", "darkos", "knulli", "mustardos", "rocknix"),
-        key_pins=(65, 64),                       # Vol-, Vol+ (GPIO2_A1, GPIO2_A0)
-        images={
-            "amberelec": f"{imgdir}/AmberELEC-RG351MP.aarch64-prerelease-20261019_1835.img",
-            "arkos": f"{imgdir}/ArkOS_RG351MP_v2.0_12242024.img",
-            "darkos": f"{imgdir}/dArkOS_G350_trixie_11142026.img",  # U-Boot + logo.bmp
-            "knulli": f"{imgdir}/knulli-rk3326-g350-scarab-20260510.img",
-            "mustardos": f"{imgdir}/MustardOS_RK-G350-V_2606.0_ANDROMEDA-db2a3bd0.img",
-            "rocknix": f"{imgdir}/ROCKNIX-RK3326.aarch64-20261101-b.img",
-        },
-        uboot_os="darkos",
-        src={
-            "amberelec": (Src(32768, 4194304),     # FAT AMBRELC 2G, UUID 1910-5621
-                          Src(4227072, 65536)),    # ext4 STORAGE 32M, UUID 7ab6cd9f-...
-            "arkos": (Src(32768, 229376),          # FAT BOOT 112M
-                      Src(262144, 13721600)),      # ext4 root 6.5G
-            "darkos": (Src(32768, 204800),         # FAT BOOT 100M
-                       Src(237568, 15360000)),     # btrfs ROOTFS 7.3G
-            "knulli": (Src(32768, 6291456),),      # FAT KNULLI 3G; its ext4 p2 is replaced by SHARE
-            "mustardos": (Src(32768, 1048576),     # FAT BOOT 512M (GPT)
-                          Src(1081344, 16777216)), # ext4 ROOTFS 8G
-            "rocknix": (Src(32768, 4194304),       # FAT ROCKNIX 2G, UUID 0111-5938
-                        Src(4227072, 65536)),      # ext4 STORAGE 32M, UUID b4434352-...
-        },
-        dtb={  # from each OS's boot.ini / extlinux.conf
-            # ArkOS's own rk3326-rg351mp-linux.dtb drives the G350 panel wrong (white,
-            # then yellow screen; tested): it gets dArkOS's dtb, same 4.4.189 kernel tree.
-            "arkos": "rk3326-g350-linux.dtb",
-            "knulli": "boot/rk3326-batlexp-linux.dtb",
-            "rocknix": "rk3326-batlexp-g350.dtb",      # extlinux/extlinux.conf.g350
-        },
-    )
+DEVICE_DIR = f"{HERE}/devices"
+DEVICE_FIELDS = ("name", "soc", "all_os", "key_pins", "table", "layout", "uboot_sectors", "boot",
+                 "images", "src", "dtb", "uuids", "os_opts", "os_boot_ini", "unique_labels",
+                 "numbers", "untested")
 
 
-def rgb30(imgdir: str) -> Device:
-    return Device(
-        key="rgb30", name="RGB30",
-        all_os=("arkos", "darkos", "knulli", "rocknix"),
-        key_pins=(104, 103),                     # Vol-, Vol+ (GPIO3_B0, GPIO3_A7)
-        images={
-            "arkos": f"{imgdir}/ArkOS_RGB30_v2.0_02092025.img",
-            "darkos": f"{imgdir}/dArkOS_RGB30_trixie_11092026.img",
-            "knulli": f"{imgdir}/knulli-rk3568-powkiddy-rgb30-scarab-20260510.img",  # U-Boot
-            "rocknix": f"{imgdir}/ROCKNIX-RK3566.aarch64-20261101-Generic.img",
-        },
-        uboot_os="knulli",
-        src={
-            "arkos": (Src(32768, 204800),          # image p3: FAT BOOT 100M (GPT)
-                      Src(237568, 15208047)),      # image p4: ext4 root 7.3G
-            "darkos": (Src(32768, 202752),         # image p3: FAT dArkOS_Fat 99M (GPT)
-                       Src(237568, 15208047)),     # image p4: btrfs ROOTFS 7.3G
-            "knulli": (Src(32768, 8388608),),      # FAT KNULLI 4G (GPT); SHARE is recreated
-            "rocknix": (Src(32768, 4194304),       # FAT ROCKNIX 2G (GPT)
-                        Src(4227072, 65536)),      # ext4 STORAGE 32M
-        },
-        dtb={  # from each OS's extlinux.conf
-            "arkos": "rk3566-OC.dtb",
-            "darkos": "rk3566-rgb30.dtb",
-            "knulli": "boot/rk3566-rgb30-linux.dtb",   # (RGB30 v2 panel: boot/rk3566-rgb30-v2-linux.dtb)
-            "rocknix": "device_trees/rk3566-powkiddy-rgb30.dtb",
-        },
-    )
+def load_device(key: str, imgdir: str) -> Device:
+    """src/devices/<key>.json -> Device. Keys starting with "_" are comments."""
+    path = f"{DEVICE_DIR}/{key}.json"
+    try:
+        with open(path) as f:
+            d = json.load(f)
+    except (OSError, ValueError) as e:
+        die(f"cannot read {path}: {e}")
+    missing = [k for k in DEVICE_FIELDS if k not in d]
+    if missing:
+        die(f"{path}: missing {', '.join(missing)}")
+    d = {k: v for k, v in d.items() if not k.startswith("_")}
+    dev = Device(key=key, **{**d,
+        "all_os": tuple(d["all_os"]), "key_pins": tuple(d["key_pins"]),
+        "uboot_sectors": tuple(d["uboot_sectors"]), "boot": tuple(d["boot"]),
+        "images": {o: f"{imgdir}/{f}" for o, f in d["images"].items()},
+        "src": {o: tuple(Src(p[0], p[1]) for p in parts) for o, parts in d["src"].items()},
+        "os_boot_ini": tuple(d["os_boot_ini"]), "unique_labels": tuple(d["unique_labels"]),
+        "numbers": tuple(tuple(g) for g in d["numbers"])})
+    for o in dev.all_os:
+        if o not in dev.images or o not in dev.src:
+            die(f"{path}: {o} has no image or src")
+    if dev.table not in ("mbr", "gpt"):
+        die(f"{path}: table must be mbr or gpt")
+    if not dev.boot or "if" in dev.boot[-1]:
+        die(f"{path}: the last boot rule must have no \"if\"")
+    return dev
 
 
-DEVICES = {"g350": g350, "rgb30": rgb30}
+def device_keys() -> list:
+    """Every src/devices/*.json, the default device first."""
+    keys = sorted(os.path.basename(p)[:-5] for p in glob.glob(f"{DEVICE_DIR}/*.json"))
+    return [DEFAULT_DEVICE] + [k for k in keys if k != DEFAULT_DEVICE]
+
+
+DEFAULT_DEVICE = "g350"
 
 
 # ---------------------------------------------------------------------------- helpers
@@ -235,8 +209,33 @@ def grep_n(path: str, regex: str) -> list:
 
 
 # ============================================================================ 2. choices
+def usage() -> str:
+    devs = [load_device(k, IMGDIR) for k in device_keys()]
+    lines = [
+        "Build a multi-boot SD card for the " + " or the ".join(f"{d.name} ({d.soc})" for d in devs) + ".",
+        f"Usage: sudo python3 src/flash-dualboot.py [--device {'|'.join(d.key for d in devs)}] "
+        "--os LIST [--default OS] [--plan] [/dev/sdX]",
+    ]
+    for i, d in enumerate(devs):
+        first = "  --device   " if i == 0 else "             "
+        lines.append(f"{first}{d.key}{' (default)' if i == 0 else ''}: {', '.join(d.all_os)}")
+    lines.append("             Always needed (U-Boot source, even if not in --os):")
+    for d in devs:
+        rule = d.boot[-1]
+        extra = "".join(f" (the {r['uboot_os']} image instead when {r['if']} is selected)"
+                        for r in d.boot[:-1])
+        lines.append(f"               {d.key}: the {rule['uboot_os']} image{extra}")
+    lines += [
+        "  --os       required: comma list naming 2 or 3 of the device's OSes",
+        "  --default  OS that boots with no key held (default: darkos if selected, else the first --os entry)",
+        "  --plan     print the partition layout, key mapping and boot script, then exit (no root, no writes)",
+        "The target defaults to /dev/sdb. ERASES THE WHOLE TARGET DEVICE.",
+    ]
+    return "\n".join(lines) + "\n"
+
+
 def parse_args(argv: list) -> dict:
-    opts = {"device": "g350", "os": "", "default": "", "plan": False, "dev": "/dev/sdb"}
+    opts = {"device": DEFAULT_DEVICE, "os": "", "default": "", "plan": False, "dev": "/dev/sdb"}
     args = list(argv)
     while args:
         a = args.pop(0)
@@ -250,7 +249,7 @@ def parse_args(argv: list) -> dict:
         elif a == "--plan":
             opts["plan"] = True
         elif a in ("-h", "--help"):
-            print(USAGE, end="")
+            print(usage(), end="")
             sys.exit(0)
         elif a.startswith("-"):
             die(f"unknown option: {a} (see --help)")
@@ -266,9 +265,9 @@ class Choices:
         self.plan = opts["plan"]
         self.dev = opts["dev"]                       # target block device
         key = opts["device"].lower()
-        if key not in DEVICES:
-            die(f"unknown --device '{key}' (choose from: g350 rgb30)")
-        d = self.device = DEVICES[key](IMGDIR)
+        if key not in device_keys():
+            die(f"unknown --device '{key}' (choose from: {' '.join(device_keys())})")
+        d = self.device = load_device(key, IMGDIR)
         all_os = " ".join(d.all_os)
         if not opts["os"]:
             die(f"--os is required: name 2 or 3 of: {all_os} (see --help)")
@@ -297,18 +296,14 @@ class Choices:
         # Keys: the default OS gets no key; the others, in all_os order, get Vol- then Vol+.
         self.key_os = [o for o in d.all_os if self.sel(o) and o != self.default]
 
-        # Boot mode (which U-Boot runs, and what it reads from p1):
+        # Boot mode (which U-Boot runs, and what it reads from p1), from the device's
+        # boot rules (first match wins):
         #   ini       G350: dArkOS's Hardkernel U-Boot 2017.09 runs boot.ini.
         #   scr-g350  G350 with ROCKNIX: ROCKNIX's mainline U-Boot 2025.10 runs boot.scr.
         #             (The Hardkernel U-Boot crashes ROCKNIX's mainline kernel.)
         #   scr-rgb30 RGB30: knulli's mainline U-Boot runs boot.scr.
-        self.uboot_os = d.uboot_os
-        if d.key == "rgb30":
-            self.bootmode = "scr-rgb30"
-        elif self.sel("rocknix"):
-            self.bootmode, self.uboot_os = "scr-g350", "rocknix"
-        else:
-            self.bootmode = "ini"
+        rule = next(r for r in d.boot if "if" not in r or self.sel(r["if"]))
+        self.bootmode, self.uboot_os = rule["bootmode"], rule["uboot_os"]
         self.uboot_img = d.images[self.uboot_os]
 
         self.total = 0          # card size in sectors (set by check_plan / preflight)
@@ -330,7 +325,8 @@ class Choices:
         imgs += [self.device.images[o] for o in order
                  if self.sel(o) and self.device.images[o] not in imgs]
         # G350 ArkOS boots with dArkOS's G350 dtb, copied from the dArkOS image.
-        if self.device.key == "g350" and self.sel("arkos") and self.device.images["darkos"] not in imgs:
+        if (self.sel("arkos") and self.device.opt("arkos", "dtb_from_darkos")
+                and self.device.images["darkos"] not in imgs):
             imgs.append(self.device.images["darkos"])
         return imgs
 
@@ -348,8 +344,8 @@ class Choices:
         return self.path(self.n(role))
 
     def partuuid(self, num: int) -> str:
-        """MBR: disk ID + N in hex. GPT (RGB30): a fixed GUID ending in N."""
-        if self.device.key == "rgb30":
+        """MBR: disk ID + N in hex. GPT: a fixed GUID ending in N."""
+        if self.device.gpt:
             return f"{DISKID}-0000-4000-8000-{num:012x}"
         return f"{DISKID}-{num:02x}"
 
@@ -375,7 +371,7 @@ class Layout:
         self.sfdisk = header
         self.parts: list = []    # in listing order (MBR extended partition included)
         self.n: dict = {}        # role -> partition number, e.g. n["DRK_BOOT"]
-        self.pos = P1_START      # next free sector
+        self.pos = c.device.uboot_sectors[1]   # next free sector: right after U-Boot
         self.next_num = first_logical
         self.gap = gap
         self.rom_sizes = rom_sizes
@@ -428,8 +424,8 @@ def make_layout(c: Choices) -> Layout:
     d = c.device
     src = d.src
     # Space left for ROM partitions is split equally between the selected OSes.
-    fixed, nlog = P1_START, 0
-    if d.key == "g350" and c.sel("amberelec"):
+    fixed, nlog = d.uboot_sectors[1], 0
+    if c.sel("amberelec"):                         # AmberELEC's FAT partition holds p1's boot file
         fixed += AMB_BOOT_SIZE + AMB_STOR_SIZE
     else:
         fixed += BOOTSEL_SIZE
@@ -448,7 +444,7 @@ def make_layout(c: Choices) -> Layout:
     if c.sel("rocknix"):
         fixed += src["rocknix"][0].size + RNX_STOR_SIZE
         nlog += 3
-    if d.key == "g350":
+    if not d.gpt:
         gap, end = GAP, c.total
     else:
         gap = 0                                    # GPT: no extended partition, no gaps
@@ -461,12 +457,13 @@ def make_layout(c: Choices) -> Layout:
         die(f"card too small ({c.total} sectors)")
     rom_sizes = [rom] * (nrom - 1) + [last]
 
-    if d.key == "g350":
-        lay = Layout(c, f"label: dos\nlabel-id: 0x{DISKID}\nunit: sectors\n\n", 5, gap, rom_sizes)
-        layout_g350(c, lay)
-    else:
+    if d.gpt:
         lay = Layout(c, f"label: gpt\nlabel-id: {c.partuuid(0)}\nunit: sectors\n\n", 1, gap, rom_sizes)
-        layout_rgb30(c, lay)
+    else:
+        lay = Layout(c, f"label: dos\nlabel-id: 0x{DISKID}\nunit: sectors\n\n", 5, gap, rom_sizes)
+    if d.layout not in LAYOUTS:
+        die(f"unknown layout '{d.layout}' in src/devices/{d.key}.json (choose from: {' '.join(LAYOUTS)})")
+    LAYOUTS[d.layout](c, lay)
     if lay.pos > end:
         die(f"layout overflows the card ({lay.pos} > {end} sectors)")
     return lay
@@ -585,23 +582,39 @@ def layout_rgb30(c: Choices, lay: Layout):
         die("internal: knulli must be p1/p2")
 
 
+# The layout functions by name ("layout" in src/devices/<device>.json). The partition
+# order and the numbers each OS needs are code, not data: see the checks at their ends.
+LAYOUTS = {"g350": layout_g350, "rgb30": layout_rgb30}
+
+
 # ============================================================================ 4. per-OS code
 # Each OS class holds everything about that OS:
 #   prefix   partition roles are <prefix>_BOOT, <prefix>_ROOT, ...
 #   copied   roles that receive the image's partitions (Device.src), in order
 #   roms     (role, exFAT label, what) of its ROM partition
-#   boot     U-Boot commands per boot mode, as they appear in the shared boot script
-#            (@BOOTX@ = BOOT number in hex, @ROOT@ / @ROOT_PU@ = root number / PARTUUID).
-#            If you change them, change src/boot.ini.<os> too where it exists.
+#   tools    commands its steps need (checked before the real run)
+#   boot_ini where src/boot.ini.<os> goes on its BOOT partition (devices listing it in
+#            "os_boot_ini")
 #   fix_fs / prepare / verify   steps of the real run (copying and mkfs are generic)
+# Its U-Boot commands, as they appear in the shared boot script, are in
+# src/boot/<os>.<bootmode>.cmd (@BOOTX@ = BOOT number in hex, @ROOT@ / @ROOT_PU@ = root
+# number / PARTUUID, @DTB@ = the device's dtb for it). If you change them, change
+# src/boot.ini.<os> too where it exists.
+BOOT_DIR = f"{HERE}/boot"
+
+
 class OS:
     key = name = prefix = ""
     copied: tuple = ()
     roms: tuple = ()
-    boot: dict = {}
+    tools: tuple = ()
+    boot_ini = ""
 
     def branch(self, c: Choices) -> str:
-        return fill(self.boot[c.bootmode], **self.boot_values(c))
+        path = f"{BOOT_DIR}/{self.key}.{c.bootmode}.cmd"
+        if not os.path.isfile(path):
+            die(f"{self.name} has no boot commands for boot mode {c.bootmode} ({path})")
+        return fill(read(path), **self.boot_values(c))
 
     def boot_values(self, c: Choices) -> dict:
         v = {"BOOTX": hx(c.n(f"{self.prefix}_BOOT")), "DTB": c.device.dtb.get(self.key, "")}
@@ -639,24 +652,7 @@ class AmberELEC(OS):
     key, name, prefix = "amberelec", "AmberELEC", "AMB"
     copied = ("AMB_BOOT", "AMB_STOR")
     roms = ("AMB_ROMS", "GAMES", "AmberELEC roms")   # AmberELEC creates its folders via tmpfiles.d
-    boot = {
-        "ini": """\
-  # AmberELEC
-  setenv fdt_addr_r "0x01f00000"
-  setenv loadaddr "0x00200000"
-  setenv scriptaddr "0x00500000"
-  setenv kernel_addr_r "0x02008000"
-  sysboot mmc 1:@BOOTX@ any ${scriptaddr} /extlinux/rk3326-rg351mp-linux.dtb.conf
-""",
-        "scr-g350": """\
-  # AmberELEC
-  setenv fdt_addr_r "0x01f00000"
-  setenv loadaddr "0x00200000"
-  setenv scriptaddr "0x00500000"
-  setenv kernel_addr_r "0x02008000"
-  sysboot ${devtype} ${devnum}:@BOOTX@ any ${scriptaddr} /extlinux/rk3326-rg351mp-linux.dtb.conf
-""",
-    }
+    tools = ("e2fsck", "resize2fs", "debugfs", "dumpe2fs")
 
     def fix_fs(self, c):
         log("AmberELEC STORAGE: fsck + grow to 8G + remove .please_resize_me")
@@ -667,9 +663,9 @@ class AmberELEC(OS):
 
     def verify(self, c):
         check_label(c, "AMB_ROMS", "GAMES")
-        if blkid(c.part("AMB_BOOT"), "UUID") != AMB_BOOT_UUID:
+        if blkid(c.part("AMB_BOOT"), "UUID") != c.device.uuids["AMB_BOOT"]:
             die("AMBRELC UUID changed")
-        if blkid(c.part("AMB_STOR"), "UUID") != AMB_STOR_UUID:
+        if blkid(c.part("AMB_STOR"), "UUID") != c.device.uuids["AMB_STOR"]:
             die("STORAGE UUID changed")
         for line in output(["dumpe2fs", "-h", c.part("AMB_STOR")]).splitlines():
             if re.search("Block count|Block size", line):
@@ -682,38 +678,8 @@ class DarkOS(OS):
     key, name, prefix = "darkos", "dArkOS", "DRK"
     copied = ("DRK_BOOT", "DRK_ROOT")
     roms = ("DRK_ROMS", "EASYROMS", "dArkOS roms")
-    boot = {
-        "ini": """\
-  # dArkOS
-  setenv bootargs "root=PARTUUID=@ROOT_PU@ rootwait rw fsck.repair=yes net.ifnames=0 fbcon=rotate:0 console=/dev/ttyFIQ0 quiet splash consoleblank=0 vt.global_cursor_default=0"
-  setenv loadaddr "0x02000000"
-  setenv initrd_loadaddr "0x04000000"
-  setenv dtb_loadaddr "0x01f00000"
-  load mmc 1:@BOOTX@ ${loadaddr} Image
-  load mmc 1:@BOOTX@ ${initrd_loadaddr} uInitrd
-  load mmc 1:@BOOTX@ ${dtb_loadaddr} rk3326-g350-linux.dtb
-  booti ${loadaddr} ${initrd_loadaddr} ${dtb_loadaddr}
-""",
-        "scr-g350": """\
-  # dArkOS
-  setenv bootargs "root=PARTUUID=@ROOT_PU@ rootwait rw fsck.repair=yes net.ifnames=0 fbcon=rotate:0 console=/dev/ttyFIQ0 quiet splash consoleblank=0 vt.global_cursor_default=0"
-  load ${devtype} ${devnum}:@BOOTX@ 0x02000000 Image
-  load ${devtype} ${devnum}:@BOOTX@ 0x04000000 uInitrd
-  load ${devtype} ${devnum}:@BOOTX@ 0x01f00000 rk3326-g350-linux.dtb
-  booti 0x02000000 0x04000000 0x01f00000
-""",
-        "scr-rgb30": """\
-  # dArkOS (vendor 5.10 kernel). Despite its name, uInitrd is a plain gzip initramfs
-  # (no U-Boot header), so it needs :size; it is loaded last for ${filesize}.
-  # Its initramfs ignores root= and always mounts /dev/mmcblk1p4 (hence dArkOS on p4).
-  # loglevel=0, not the image's 5: kernel messages on tty1 cover the splash.
-  setenv bootargs "root=/dev/mmcblk1p@ROOT@ initrd=/uInitrd rootwait rw fsck.repair=yes quiet splash vt.global_cursor_default=0 net.ifnames=0 console=tty1 plymouth.ignore-serial-consoles consoleblank=0 loglevel=0 video=HDMI-A-1:1280x720@60"
-  load ${devtype} ${devnum}:@BOOTX@ ${kernel_addr_r} /Image
-  load ${devtype} ${devnum}:@BOOTX@ ${fdt_addr_r} /@DTB@
-  load ${devtype} ${devnum}:@BOOTX@ ${ramdisk_addr_r} /uInitrd
-  booti ${kernel_addr_r} ${ramdisk_addr_r}:${filesize} ${fdt_addr_r}
-""",
-    }
+    tools = ("btrfs", "tar")
+    boot_ini = "/boot/boot.ini"
 
     def prepare(self, c):
         """Do what dArkOS's first boot would do (it would repartition the card)."""
@@ -730,14 +696,14 @@ class DarkOS(OS):
             # On the RGB30 dArkOS is on p3/p4/p5 as in its image, so its fstab.exfat
             # (/dev/mmcblk1p3/p4/p5) is used as is, like on the G350.
             shutil.copyfile(f"{boot}/fstab.exfat", f"{root}/etc/fstab")
-            if c.device.key == "rgb30":
+            if "darkos" in c.device.dtb:               # loaded by the boot script itself
                 for f in ("Image", "uInitrd", c.device.dtb["darkos"]):
                     need_file(f"{boot}/{f}")
             rm_f(f"{root}/etc/systemd/system/multi-user.target.wants/firstboot.service",
                  f"{boot}/firstboot.sh", f"{boot}/expandtoexfat.sh", f"{boot}/fstab.exfat",
                  *glob.glob(f"{boot}/doneit*"))
-            if c.device.key == "g350":
-                write(f"{boot}/boot.ini", render(c, "darkos"))
+            if self.key in c.device.os_boot_ini:
+                write(f"{boot}{self.boot_ini}", render(c, self.key))
             print("--- dArkOS /etc/fstab:")
             print(read(f"{root}/etc/fstab"), end="")
             if c.bootmode != "ini":
@@ -746,7 +712,7 @@ class DarkOS(OS):
     def verify(self, c):
         check_label(c, "DRK_ROMS", "EASYROMS")
         check_partuuid(c, "DRK_ROOT")
-        if c.device.key == "rgb30":
+        if c.device.gpt:
             check_partuuid(c, "DRK_BOOT")
 
 
@@ -779,36 +745,8 @@ class ArkOS(OS):
     key, name, prefix = "arkos", "ArkOS", "ARK"
     copied = ("ARK_BOOT", "ARK_ROOT")
     roms = ("ARK_ROMS", ARK_ROMS_LABEL, "ArkOS roms")
-    boot = {
-        "ini": """\
-  # ArkOS (RG351MP image; dArkOS's G350 dtb, copied to its BOOT by the script)
-  setenv bootargs "root=PARTUUID=@ROOT_PU@ rootwait rw fsck.repair=yes net.ifnames=0 fbcon=rotate:0 console=/dev/ttyFIQ0 quiet splash plymouth.ignore-serial-consoles consoleblank=0 vt.global_cursor_default=0"
-  setenv loadaddr "0x02000000"
-  setenv initrd_loadaddr "0x01100000"
-  setenv dtb_loadaddr "0x01f00000"
-  load mmc 1:@BOOTX@ ${loadaddr} Image
-  load mmc 1:@BOOTX@ ${initrd_loadaddr} uInitrd
-  load mmc 1:@BOOTX@ ${dtb_loadaddr} @DTB@
-  booti ${loadaddr} ${initrd_loadaddr} ${dtb_loadaddr}
-""",
-        "scr-g350": """\
-  # ArkOS (UNTESTED; same commands as its boot.ini branch)
-  setenv bootargs "root=PARTUUID=@ROOT_PU@ rootwait rw fsck.repair=yes net.ifnames=0 fbcon=rotate:0 console=/dev/ttyFIQ0 quiet splash plymouth.ignore-serial-consoles consoleblank=0 vt.global_cursor_default=0"
-  load ${devtype} ${devnum}:@BOOTX@ 0x02000000 Image
-  load ${devtype} ${devnum}:@BOOTX@ 0x01100000 uInitrd
-  load ${devtype} ${devnum}:@BOOTX@ 0x01f00000 @DTB@
-  booti 0x02000000 0x01100000 0x01f00000
-""",
-        "scr-rgb30": """\
-  # ArkOS (UNTESTED; vendor kernel). uInitrd is a plain gzip initramfs (needs :size),
-  # patched by the script to follow root= instead of /dev/mmcblk1p4.
-  setenv bootargs "root=PARTUUID=@ROOT_PU@ initrd=/uInitrd rootwait rw fsck.repair=yes quiet splash net.ifnames=0 console=tty1 plymouth.ignore-serial-consoles consoleblank=0 loglevel=0 video=HDMI-A-1:1280x720@60"
-  load ${devtype} ${devnum}:@BOOTX@ ${kernel_addr_r} /Image
-  load ${devtype} ${devnum}:@BOOTX@ ${fdt_addr_r} /@DTB@
-  load ${devtype} ${devnum}:@BOOTX@ ${ramdisk_addr_r} /uInitrd
-  booti ${kernel_addr_r} ${ramdisk_addr_r}:${filesize} ${fdt_addr_r}
-""",
-    }
+    tools = ("e2fsck", "resize2fs", "fatlabel", "tar")
+    boot_ini = "/boot/boot.ini"
     INITRD_OLD = b'local dev_id="/dev/mmcblk1p4"'     # scripts/local in the RGB30 uInitrd
     INITRD_NEW = b'local dev_id="$1"'.ljust(len(INITRD_OLD))   # same length: cpio sizes stay valid
 
@@ -847,8 +785,8 @@ class ArkOS(OS):
         with mounted(c, c.part("ARK_ROOT"), "ext4", "arkroot") as root, \
              mounted(c, c.part("ARK_BOOT"), "vfat", "arkboot") as boot, \
              mounted(c, c.part("ARK_ROMS"), "exfat", "arkroms") as roms:
-            if c.device.key == "g350":
-                log(f"ArkOS: copying {c.device.dtb['arkos']} from the dArkOS image (G350 panel)")
+            if c.device.opt("arkos", "dtb_from_darkos"):
+                log(f"ArkOS: copying {c.device.dtb['arkos']} from the dArkOS image ({c.device.name} panel)")
                 copy_from_darkos_boot(c, c.device.dtb["arkos"], boot)
             for f in ("Image", "uInitrd", c.device.dtb["arkos"], "fstab.exfat"):
                 need_file(f"{boot}/{f}")
@@ -857,22 +795,24 @@ class ArkOS(OS):
 
             log("Finishing ArkOS first-boot steps (fstab by PARTUUID, disable firstboot.service)")
             write(f"{root}/etc/fstab", self.fstab(c, read(f"{boot}/fstab.exfat")))
-            if c.device.key == "rgb30":
-                # firstboot.sh's own fixes, done before it calls expandtoexfat.sh
+            aspect = c.device.opt("arkos", "aspect_ratio_index")
+            if aspect:
+                # firstboot.sh's own fix (RK3566), done before it calls expandtoexfat.sh
                 for cfg in ("retroarch.cfg", "retroarch.cfg.bak"):
                     p = f"{root}/home/ark/.config/retroarch/{cfg}"
                     if os.path.isfile(p):
-                        text = re.sub(r'(?m)^aspect_ratio_index = ".*$', 'aspect_ratio_index = "22"', read(p))
+                        text = re.sub(r'(?m)^aspect_ratio_index = ".*$', f'aspect_ratio_index = "{aspect}"', read(p))
                         write(p, text)
                         os.chown(p, 1002, 1002)              # ark:ark
+            if c.device.opt("arkos", "patch_initrd"):
                 log("ArkOS: patching uInitrd to follow root= (it hard-codes /dev/mmcblk1p4)")
                 self.patch_initrd(f"{boot}/uInitrd")
             rm_f(f"{root}/etc/systemd/system/multi-user.target.wants/firstboot.service",
                  f"{boot}/firstboot.sh", f"{boot}/expandtoexfat.sh", f"{boot}/fstab.exfat",
                  *glob.glob(f"{boot}/doneit*"))
-            if c.device.key == "g350":
-                shutil.copyfile(f"{boot}/boot.ini", f"{boot}/boot.ini.orig")
-                write(f"{boot}/boot.ini", render(c, "arkos"))
+            if self.key in c.device.os_boot_ini:
+                shutil.copyfile(f"{boot}{self.boot_ini}", f"{boot}{self.boot_ini}.orig")
+                write(f"{boot}{self.boot_ini}", render(c, self.key))
             print("--- ArkOS /etc/fstab:")
             print(read(f"{root}/etc/fstab"), end="")
             if c.bootmode != "ini":
@@ -892,26 +832,8 @@ class MustardOS(OS):
     key, name, prefix = "mustardos", "MustardOS", "MUS"
     copied = ("MUS_BOOT", "MUS_ROOT")
     roms = ("MUS_ROM", "ROMS", "MustardOS roms")      # MustardOS reformats it on first boot
-    boot = {
-        "ini": """\
-  # MustardOS (no initrd). rk3326-batlexp-linux.dtb has the same panel init as
-  # dArkOS's rk3326-g350-linux.dtb. If it hangs, try dtb_loadaddr "0x1000000"
-  # (MustardOS's own value).
-  setenv bootargs "root=PARTUUID=@ROOT_PU@ rootfstype=ext4 rw rootwait quiet loglevel=0 cma=64M fbcon=nodefer vt.global_cursor_default=0 init=/sbin/init"
-  setenv loadaddr "0x02000000"
-  setenv dtb_loadaddr "0x01f00000"
-  load mmc 1:@BOOTX@ ${loadaddr} Image
-  load mmc 1:@BOOTX@ ${dtb_loadaddr} rk3326-batlexp-linux.dtb
-  booti ${loadaddr} - ${dtb_loadaddr}
-""",
-        "scr-g350": """\
-  # MustardOS (UNTESTED with the ROCKNIX U-Boot; same commands as its boot.ini branch)
-  setenv bootargs "root=PARTUUID=@ROOT_PU@ rootfstype=ext4 rw rootwait quiet loglevel=0 cma=64M fbcon=nodefer vt.global_cursor_default=0 init=/sbin/init"
-  load ${devtype} ${devnum}:@BOOTX@ 0x02000000 Image
-  load ${devtype} ${devnum}:@BOOTX@ 0x01f00000 rk3326-batlexp-linux.dtb
-  booti 0x02000000 - 0x01f00000
-""",
-    }
+    tools = ("e2fsck",)
+    boot_ini = "/boot.ini"
     NUM_FILES = {"boot": "MUS_BOOT", "root": "MUS_ROOT", "rom": "MUS_ROM"}
     STORAGE_CFG = "opt/muos/device/config/storage"
 
@@ -952,8 +874,9 @@ class MustardOS(OS):
             print("--- patched reset.sh lines:")
             print("\n".join(patched))
 
-            shutil.copyfile(f"{boot}/boot.ini", f"{boot}/boot.ini.orig")
-            write(f"{boot}/boot.ini", render(c, "mustardos"))   # reference only; U-Boot reads p1
+            if self.key in c.device.os_boot_ini:           # reference only; U-Boot reads p1
+                shutil.copyfile(f"{boot}{self.boot_ini}", f"{boot}{self.boot_ini}.orig")
+                write(f"{boot}{self.boot_ini}", render(c, self.key))
             if c.bootmode != "ini":
                 install_next(c, "mustardos", root)
 
@@ -982,40 +905,13 @@ class Knulli(OS):
     # G350: knulli's boot.ini loads boot/linux (a uImage that bootm copies to 0x01080000)
     # at 0x02000000; that overlaps its copy, which mainline U-Boot refuses, so the
     # uImage and uInitrd are loaded higher up.
-    boot = {
-        "ini": """\
-  # knulli (boots, tested; finds its boot partition by label=KNULLI, /userdata on the
-  # next partition)
-  setenv bootargs "label=KNULLI console=tty3 fbcon=rotate:0 quiet loglevel=0 consoleblank=0 vt.global_cursor_default=0 net.ifnames=0 board=${hwrev}"
-  load mmc 1:@BOOTX@ 0x03000000 boot/linux
-  load mmc 1:@BOOTX@ 0x06000000 boot/uInitrd
-  load mmc 1:@BOOTX@ 0x01000000 @DTB@
-  bootm 0x03000000 0x06000000 0x01000000
-""",
-        "scr-g350": """\
-  # knulli (UNTESTED; same commands as its boot.ini branch, without board=${hwrev})
-  setenv bootargs "label=KNULLI console=tty3 fbcon=rotate:0 quiet loglevel=0 consoleblank=0 vt.global_cursor_default=0 net.ifnames=0"
-  load ${devtype} ${devnum}:@BOOTX@ 0x03000000 boot/linux
-  load ${devtype} ${devnum}:@BOOTX@ 0x06000000 boot/uInitrd
-  load ${devtype} ${devnum}:@BOOTX@ 0x01000000 @DTB@
-  bootm 0x03000000 0x06000000 0x01000000
-""",
-        "scr-rgb30": """\
-  # knulli (finds its boot partition by label=KNULLI, /userdata on the next partition)
-  setenv bootargs "initrd=/boot/initrd.lz4 label=KNULLI rootwait quiet loglevel=0 console=tty3 console=ttyS2,1500000n8 fbcon=rotate:0"
-  load ${devtype} ${devnum}:@BOOTX@ ${kernel_addr_r} /boot/linux
-  load ${devtype} ${devnum}:@BOOTX@ ${fdt_addr_r} /@DTB@
-  load ${devtype} ${devnum}:@BOOTX@ ${ramdisk_addr_r} /boot/initrd.lz4
-  booti ${kernel_addr_r} ${ramdisk_addr_r}:${filesize} ${fdt_addr_r}
-""",
-    }
 
     def prepare(self, c):
         log(f"knulli: disable autoresize (it would resize p{c.n('KNU_SHARE')} to 100% of the card)")
         with mounted(c, c.part("KNU_BOOT"), "vfat", "knboot") as boot:
             conf = f"{boot}/knulli-boot.conf"
             need_file(conf)
-            initrd = "boot/initrd.lz4" if c.device.key == "rgb30" else "boot/uInitrd"
+            initrd = c.device.opt("knulli", "initrd")
             for f in ("boot/linux", initrd, c.device.dtb["knulli"]):
                 need_file(f"{boot}/{f}")
             shutil.copyfile(conf, f"{conf}.orig")
@@ -1044,35 +940,16 @@ class Rocknix(OS):
     key, name, prefix = "rocknix", "ROCKNIX", "RNX"
     copied = ("RNX_BOOT", "RNX_STOR")
     roms = ("RNX_ROMS", "GAMES", "ROCKNIX roms")
-    boot = {
-        "scr-g350": """\
-  # ROCKNIX: as its own boot.scr does; extlinux.conf.dualboot is written by the script
-  # (G350 dtb, boot=UUID=@RNX_BOOT_UUID@ disk=UUID=@RNX_STOR_UUID@).
-  setenv kernel_addr_r "0x09000000"
-  setenv fdtoverlay_addr_r "0x08000000"
-  sysboot ${devtype} ${devnum}:@BOOTX@ any 0x100000 /extlinux/extlinux.conf.dualboot
-""",
-        "scr-rgb30": """\
-  # ROCKNIX (initramfs built into KERNEL; finds its partitions by label)
-  setenv bootargs "boot=LABEL=ROCKNIX disk=LABEL=STORAGE quiet console=ttyS2,1500000 console=tty0 systemd.debug_shell=ttyS2"
-  load ${devtype} ${devnum}:@BOOTX@ ${kernel_addr_r} /KERNEL
-  load ${devtype} ${devnum}:@BOOTX@ ${fdt_addr_r} /@DTB@
-  booti ${kernel_addr_r} - ${fdt_addr_r}
-""",
-    }
-    EXTLINUX = """\
-LABEL ROCKNIX
-  LINUX /KERNEL
-  FDT /@DTB@
-  APPEND boot=UUID=@RNX_BOOT_UUID@ disk=UUID=@RNX_STOR_UUID@ quiet console=ttyS2,1500000 console=tty0 systemd.debug_shell=ttyS2
-"""
+    tools = ("e2fsck", "resize2fs", "debugfs", "unsquashfs")
 
     def boot_values(self, c):
-        return {**super().boot_values(c), "RNX_BOOT_UUID": RNX_BOOT_UUID, "RNX_STOR_UUID": RNX_STOR_UUID}
+        u = c.device.uuids
+        return {**super().boot_values(c), "RNX_BOOT_UUID": u.get("RNX_BOOT", ""),
+                "RNX_STOR_UUID": u.get("RNX_STOR", "")}
 
     def extlinux(self, c) -> str:
         """G350: /extlinux/extlinux.conf.dualboot on ROCKNIX's FAT partition."""
-        return fill(self.EXTLINUX, **self.boot_values(c))
+        return fill(read(f"{BOOT_DIR}/rocknix.extlinux.conf"), **self.boot_values(c))
 
     def fix_fs(self, c):
         log("ROCKNIX STORAGE: fsck + grow to 8G + remove .please_resize_me")
@@ -1123,23 +1000,19 @@ LABEL ROCKNIX
         check_label(c, "RNX_STOR", "STORAGE")
         check_label(c, "RNX_ROMS", "GAMES")
         check_partuuid(c, "RNX_ROMS")
-        if c.device.key == "g350":
-            if blkid(c.part("RNX_BOOT"), "UUID") != RNX_BOOT_UUID:
+        boot_uuid = c.device.uuids.get("RNX_BOOT")
+        if boot_uuid:                                    # the device boots it by UUID
+            if blkid(c.part("RNX_BOOT"), "UUID") != boot_uuid:
                 die("ROCKNIX boot UUID changed")
-            if blkid(c.part("RNX_STOR"), "UUID") != RNX_STOR_UUID:
+            if blkid(c.part("RNX_STOR"), "UUID") != c.device.uuids["RNX_STOR"]:
                 die("ROCKNIX STORAGE UUID changed")
             uuids = [blkid(c.path(n), "UUID") for n in c.lay.numbered()]
-            if uuids.count(RNX_BOOT_UUID) != 1:
-                die(f"UUID {RNX_BOOT_UUID} is used twice")
+            if uuids.count(boot_uuid) != 1:
+                die(f"UUID {boot_uuid} is used twice")
 
 
 ALL_OSES = [AmberELEC(), DarkOS(), ArkOS(), MustardOS(), Knulli(), Rocknix()]
 OS_BY_KEY = {o.key: o for o in ALL_OSES}
-
-
-# Shown as a warning by --plan: not yet booted on a device in that boot mode
-# (G350 ini mode: ArkOS and knulli boot, tested).
-UNTESTED = {"scr-g350": ("arkos", "knulli"), "scr-rgb30": ("arkos",)}
 
 
 def osname(key: str) -> str:
@@ -1183,7 +1056,7 @@ def next_helper(c: Choices) -> str:
         die(f"missing {path}")
     return fill(read(path), DEVICE=c.device.name, OSES=" ".join(c.user_os),
                 PARTUUID=c.partuuid(bootsel), PARTNUM=bootsel,
-                DISKID_AT=568 if c.device.key == "rgb30" else 440,   # GPT: disk GUID in the header
+                DISKID_AT=568 if c.device.gpt else 440,   # GPT: disk GUID in the header
                 DISKID_HEX=bytes.fromhex(DISKID)[::-1].hex())          # as stored (little endian)
 
 
@@ -1269,20 +1142,14 @@ def boot_ini_g350(c: Choices) -> str:
     return "\n".join(lines) + "\n\n" + boot_branches(c)
 
 
-# G350, ROCKNIX's mainline U-Boot: read the keys from the GPIO register into ${key}.
-KEYS_G350 = """
-gpio input C1; gpio input C0
-mw.l 0xff140070 0x000f0005
-sleep 0.1
-setexpr.l gpio2_ext *0xff260050
-setexpr volup_bit ${gpio2_ext} % 2
-setexpr t ${gpio2_ext} / 2
-setexpr voldn_bit ${t} % 2
-# Vol+ first: a press at an angle can also pull Vol- low; Vol- alone reads cleanly.
-setenv key none
-if itest ${volup_bit} == 0; then setenv key volplus; elif itest ${voldn_bit} == 0; then setenv key volminus; fi
-
-"""
+def keys_block(c: Choices) -> str:
+    """boot.scr: read the keys into ${key} (src/boot/keys.<bootmode>.cmd).
+    scr-g350: ROCKNIX's mainline U-Boot reads the GPIO register with setexpr.
+    scr-rgb30: knulli's U-Boot (no gpio, no setexpr) compares register bytes copied to RAM."""
+    path = f"{BOOT_DIR}/keys.{c.bootmode}.cmd"
+    if not os.path.isfile(path):
+        die(f"missing {path}")
+    return "\n" + read(path) + "\n"
 
 
 def boot_cmd_g350(c: Choices) -> str:
@@ -1300,19 +1167,9 @@ def boot_cmd_g350(c: Choices) -> str:
         "#",
         *layout_comment(c),
     ]
-    return "\n".join(lines) + "\n" + KEYS_G350 + next_block(c) + boot_branches(c)
+    return "\n".join(lines) + "\n" + keys_block(c) + next_block(c) + boot_branches(c)
 
 
-# RGB30, knulli's U-Boot (no gpio, no setexpr): compare register bytes copied to RAM.
-KEYS_RGB30 = """
-mw.l 0xfdc600a0 0xc0004000
-mw.l 0xfdc600a4 0xffff5555
-sleep 0.1
-cp.l 0xfe760070 0x30000000 1
-setenv key none
-if itest.b *0x30000000 < 0x80; then setenv key volplus; elif itest.b *0x30000001 == 0xfe || itest.b *0x30000001 == 0x7e; then setenv key volminus; fi
-
-"""
 
 
 def boot_cmd_rgb30(c: Choices) -> str:
@@ -1330,7 +1187,7 @@ def boot_cmd_rgb30(c: Choices) -> str:
         "#",
         *layout_comment(c),
     ]
-    return "\n".join(lines) + "\n" + KEYS_RGB30 + next_block(c) + boot_branches(c)
+    return "\n".join(lines) + "\n" + keys_block(c) + next_block(c) + boot_branches(c)
 
 
 def boot_config(c: Choices) -> str:
@@ -1361,7 +1218,7 @@ def show_plan(c: Choices):
     print(f"U-Boot:   {os.path.basename(c.uboot_img)} (always needed{note})")
     if c.bootmode == "scr-g350" and c.sel("mustardos"):
         print("WARNING:  MustardOS has not been tested with the ROCKNIX U-Boot (needed for ROCKNIX).")
-    untested = [osname(o) for o in UNTESTED.get(c.bootmode, ()) if c.sel(o)]
+    untested = [osname(o) for o in c.device.untested.get(c.bootmode, ()) if c.sel(o)]
     if untested:
         uboot = " with the ROCKNIX U-Boot" if c.bootmode == "scr-g350" else ""
         print(f"WARNING:  not tested on a {c.device.name}{uboot} yet: {', '.join(untested)}.")
@@ -1376,16 +1233,8 @@ def show_plan(c: Choices):
     for p in c.lay.parts:
         print(f"  {p.line()}")
     n = c.lay.n
-    if c.device.key == "g350":
-        roles = ["DRK_ROMS", "DRK_BOOT", "DRK_ROOT", "MUS_BOOT", "MUS_ROOT", "MUS_ROM"]
-        if "RNX_BOOT" in n:
-            roles += ["RNX_BOOT", "RNX_STOR", "RNX_ROMS"]
-        if "KNU_BOOT" in n:
-            roles += ["KNU_BOOT", "KNU_SHARE"]
-    else:
-        roles = ["KNU_BOOT", "KNU_SHARE", "DRK_ROMS", "DRK_BOOT", "DRK_ROOT", "RNX_BOOT", "RNX_STOR", "RNX_ROMS"]
-    if "ARK_BOOT" in n:
-        roles += ["ARK_BOOT", "ARK_ROOT", "ARK_ROMS"]
+    first, *more = c.device.numbers           # later groups only when their first role exists
+    roles = list(first) + [r for g in more if g[0] in n for r in g]
     print("Numbers:  " + " ".join(f"{r}_N={n.get(r, '-')}" for r in roles))
 
 
@@ -1402,16 +1251,11 @@ def print_plan(c: Choices, boot_cfg: str):
     if c.bootmode == "scr-g350":
         print(f"\n---- ROCKNIX /extlinux/extlinux.conf.dualboot (p{c.n('RNX_BOOT')})")
         print(OS_BY_KEY["rocknix"].extlinux(c), end="")
-    if c.device.key == "g350":
-        if c.sel("darkos"):
-            print(f"\n---- dArkOS /boot/boot.ini (p{c.n('DRK_BOOT')})")
-            print(render(c, "darkos"), end="")
-        if c.sel("arkos"):
-            print(f"\n---- ArkOS /boot/boot.ini (p{c.n('ARK_BOOT')})")
-            print(render(c, "arkos"), end="")
-        if c.sel("mustardos"):
-            print(f"\n---- MustardOS /boot.ini (p{c.n('MUS_BOOT')})")
-            print(render(c, "mustardos"), end="")
+    for os_key in c.device.os_boot_ini:
+        if c.sel(os_key):
+            o = OS_BY_KEY[os_key]
+            print(f"\n---- {o.name} {o.boot_ini} (p{c.n(o.prefix + '_BOOT')})")
+            print(render(c, os_key), end="")
     if c.bootmode != "ini":
         print("\n---- multiboot-next (installed on each OS)")
         print(next_helper(c), end="")
@@ -1523,29 +1367,20 @@ def preflight(c: Choices):
     for f in c.images():
         if not os.path.isfile(f):
             die(f"image not found: {f}")
-    if c.device.key == "g350":
-        for o in ("arkos", "darkos", "mustardos"):
-            if c.sel(o) and not os.path.isfile(f"{HERE}/boot.ini.{o}"):
-                die(f"missing {HERE}/boot.ini.{o}")
+    for o in c.device.os_boot_ini:
+        if c.sel(o) and not os.path.isfile(f"{HERE}/boot.ini.{o}"):
+            die(f"missing {HERE}/boot.ini.{o}")
     if c.bootmode != "ini" and not os.path.isfile(f"{HERE}/multiboot-next"):
         die(f"missing {HERE}/multiboot-next")
 
     tools = ["sfdisk", "wipefs", "mkfs.exfat", "blkid", "partprobe"]
-    if c.device.key == "g350":
-        tools += ["e2fsck", "resize2fs", "debugfs", "dumpe2fs"] if c.sel("amberelec") else ["mkfs.vfat"]
-        if c.sel("mustardos"):
-            tools += ["e2fsck"]
-        if c.bootmode == "scr-g350":
-            tools += ["mkimage"]
-    else:
-        tools += ["mkfs.vfat", "mkimage"]
-    if c.sel("rocknix"):
-        tools += ["e2fsck", "resize2fs", "debugfs", "unsquashfs"]
-    if c.sel("darkos"):
-        tools += ["btrfs", "tar"]
-    if c.sel("arkos"):
-        tools += ["e2fsck", "resize2fs", "fatlabel", "tar"]
-    for t in tools:
+    if not c.sel("amberelec"):
+        tools += ["mkfs.vfat"]                     # BOOTSEL
+    if c.bootmode != "ini":
+        tools += ["mkimage"]                       # boot.cmd -> boot.scr
+    for o in c.oses:
+        tools += o.tools
+    for t in dict.fromkeys(tools):
         if not shutil.which(t):
             die(f"missing tool: {t}")
 
@@ -1588,7 +1423,7 @@ def flash(c: Choices, boot_cfg: str):
         if is_block(part):
             run(["wipefs", "-a", part], check=False, stdout=subprocess.DEVNULL)
     run(["wipefs", "-a", dev])
-    table = "MBR" if c.device.key == "g350" else "GPT"
+    table = c.device.table.upper()
     log(f"Writing {table} (label-id {lay.sfdisk.splitlines()[1].split()[1]})")
     run(["sfdisk", "--wipe", "always", "--wipe-partitions", "always", dev], input=lay.sfdisk, text=True)
     if run(["partprobe", dev], check=False, stderr=subprocess.DEVNULL).returncode:
@@ -1599,9 +1434,10 @@ def flash(c: Choices, boot_cfg: str):
             die(f"{c.path(num)} missing after partitioning")
 
     # 2. U-Boot
-    log(f"Writing U-Boot (sectors 64-32767) from {os.path.basename(c.uboot_img)}")
-    run(["dd", f"if={c.uboot_img}", f"of={dev}", f"bs={S}", "skip=64", "seek=64", "count=32704",
-         "conv=notrunc,fsync", "status=none"])
+    first, end = c.device.uboot_sectors
+    log(f"Writing U-Boot (sectors {first}-{end - 1}) from {os.path.basename(c.uboot_img)}")
+    run(["dd", f"if={c.uboot_img}", f"of={dev}", f"bs={S}", f"skip={first}", f"seek={first}",
+         f"count={end - first}", "conv=notrunc,fsync", "status=none"])
 
     # 3. copy the OS partitions, fix their filesystems, create the ROM filesystems
     for o in c.oses:
@@ -1639,10 +1475,7 @@ def flash(c: Choices, boot_cfg: str):
     for o in c.oses:
         o.verify(c)
     labels = [blkid(c.path(n), "LABEL") for n in lay.numbered()]
-    unique = ("KNULLI", "SHARE", ARK_BOOT_LABEL, ARK_ROMS_LABEL, "EASYROMS")
-    if c.device.key == "rgb30":
-        unique += ("ROCKNIX", "STORAGE")
-    for label in unique:
+    for label in c.device.unique_labels:
         if labels.count(label) > 1:
             die(f"label {label} is used twice")
 

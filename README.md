@@ -357,7 +357,7 @@ What each OS needs, and what the script does about it:
 - To change `boot.scr`, edit `boot.cmd` on `BOOTSEL`, then rebuild with
   `mkimage -A arm64 -O linux -T script -C none -d boot.cmd boot.scr`.
 - knulli's own dtb for the RGB30 **v2** panel is `boot/rk3566-rgb30-v2-linux.dtb`.
-  Change `dtb["knulli"]` in `rgb30()` in the script (or the knulli branch of `boot.cmd`)
+  Change `dtb.knulli` in `src/devices/rgb30.json` (or the knulli branch of `boot.cmd`)
   on a v2 unit.
 - knulli and ROCKNIX updates only touch files on their own boot partitions.
   ROCKNIX's update copies DTBs but does not rewrite U-Boot.
@@ -438,6 +438,10 @@ are `btrfs-progs`, `exfatprogs`, `squashfs-tools` and `u-boot-tools`.
 ## Files
 
 - `src/flash-dualboot.py`: builds the card (see Usage); one class per OS
+- `src/devices/<device>.json`: per-device data: image file names, the partitions copied
+  from each image, dtbs, key pins, filesystem UUIDs, which U-Boot is used
+- `src/boot/<os>.<bootmode>.cmd`: each OS's U-Boot commands in the shared boot script;
+  `src/boot/keys.<bootmode>.cmd`: the key reading of `boot.scr`
 - `src/boot.ini.generated` (not in git): the shared boot script from the last run,
   installed on p1 as `boot.ini` and `boot.ini.dualboot`
 - `src/boot.cmd.generated` (not in git): the RGB30 boot script source from the last

@@ -1,0 +1,50 @@
+{
+  "_doc": "RGB30 (RK3566). Image names, src offsets/sizes (sfdisk -d <image>; for the dArkOS/ArkOS images their p3/p4) and dtb paths are tied to specific image releases: re-check them when an image is updated.",
+  "name": "RGB30",
+  "soc": "RK3566",
+  "all_os": ["arkos", "darkos", "knulli", "rocknix"],
+  "_key_pins": "Vol-, Vol+ (GPIO3_B0, GPIO3_A7); also the order keys are handed out",
+  "key_pins": [104, 103],
+  "table": "gpt",
+  "layout": "rgb30",
+  "uboot_sectors": [64, 32768],
+  "_boot": "knulli's mainline U-Boot (2024.07) runs boot.scr from BOOTSEL, even when knulli is not installed",
+  "boot": [
+    {"bootmode": "scr-rgb30", "uboot_os": "knulli"}
+  ],
+  "images": {
+    "arkos": "ArkOS_RGB30_v2.0_02092025.img",
+    "darkos": "dArkOS_RGB30_trixie_11092026.img",
+    "knulli": "knulli-rk3568-powkiddy-rgb30-scarab-20260510.img",
+    "rocknix": "ROCKNIX-RK3566.aarch64-20261101-Generic.img"
+  },
+  "_src": "partitions copied from each image, in order: [start, size, what] in sectors",
+  "src": {
+    "arkos": [[32768, 204800, "image p3: FAT BOOT 100M (GPT)"],
+              [237568, 15208047, "image p4: ext4 root 7.3G"]],
+    "darkos": [[32768, 202752, "image p3: FAT dArkOS_Fat 99M (GPT)"],
+               [237568, 15208047, "image p4: btrfs ROOTFS 7.3G"]],
+    "knulli": [[32768, 8388608, "FAT KNULLI 4G (GPT); SHARE is recreated"]],
+    "rocknix": [[32768, 4194304, "FAT ROCKNIX 2G (GPT)"],
+                [4227072, 65536, "ext4 STORAGE 32M"]]
+  },
+  "_dtb": "from each OS's extlinux.conf (knulli, RGB30 v2 panel: boot/rk3566-rgb30-v2-linux.dtb)",
+  "dtb": {
+    "arkos": "rk3566-OC.dtb",
+    "darkos": "rk3566-rgb30.dtb",
+    "knulli": "boot/rk3566-rgb30-linux.dtb",
+    "rocknix": "device_trees/rk3566-powkiddy-rgb30.dtb"
+  },
+  "uuids": {},
+  "os_opts": {
+    "arkos": {"patch_initrd": true, "aspect_ratio_index": "22"},
+    "knulli": {"initrd": "boot/initrd.lz4"}
+  },
+  "os_boot_ini": [],
+  "unique_labels": ["KNULLI", "SHARE", "ARKBOOT", "ARKROMS", "EASYROMS", "ROCKNIX", "STORAGE"],
+  "numbers": [
+    ["KNU_BOOT", "KNU_SHARE", "DRK_ROMS", "DRK_BOOT", "DRK_ROOT", "RNX_BOOT", "RNX_STOR", "RNX_ROMS"],
+    ["ARK_BOOT", "ARK_ROOT", "ARK_ROMS"]
+  ],
+  "untested": {"scr-rgb30": ["arkos"]}
+}

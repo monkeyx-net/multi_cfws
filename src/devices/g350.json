@@ -1,0 +1,68 @@
+{
+  "_doc": "G350 (RK3326). Image names, src offsets/sizes (sfdisk -d <image>), dtb paths and uuids are tied to specific image releases: re-check them when an image is updated.",
+  "name": "G350",
+  "soc": "RK3326",
+  "all_os": ["amberelec", "arkos", "darkos", "knulli", "mustardos", "rocknix"],
+  "_key_pins": "Vol-, Vol+ (GPIO2_A1, GPIO2_A0); also the order keys are handed out",
+  "key_pins": [65, 64],
+  "table": "mbr",
+  "layout": "g350",
+  "uboot_sectors": [64, 32768],
+  "_boot": "first matching rule wins. ini: dArkOS's Hardkernel U-Boot 2017.09 runs boot.ini. scr-g350: ROCKNIX's mainline U-Boot runs boot.scr (the Hardkernel U-Boot crashes ROCKNIX's mainline kernel).",
+  "boot": [
+    {"if": "rocknix", "bootmode": "scr-g350", "uboot_os": "rocknix"},
+    {"bootmode": "ini", "uboot_os": "darkos"}
+  ],
+  "images": {
+    "amberelec": "AmberELEC-RG351MP.aarch64-prerelease-20261019_1835.img",
+    "arkos": "ArkOS_RG351MP_v2.0_12242024.img",
+    "darkos": "dArkOS_G350_trixie_11142026.img",
+    "knulli": "knulli-rk3326-g350-scarab-20260510.img",
+    "mustardos": "MustardOS_RK-G350-V_2606.0_ANDROMEDA-db2a3bd0.img",
+    "rocknix": "ROCKNIX-RK3326.aarch64-20261101-b.img"
+  },
+  "_src": "partitions copied from each image, in order: [start, size, what] in sectors",
+  "src": {
+    "amberelec": [[32768, 4194304, "FAT AMBRELC 2G, UUID 1910-5621"],
+                  [4227072, 65536, "ext4 STORAGE 32M, UUID 7ab6cd9f-..."]],
+    "arkos": [[32768, 229376, "FAT BOOT 112M"],
+              [262144, 13721600, "ext4 root 6.5G"]],
+    "darkos": [[32768, 204800, "FAT BOOT 100M"],
+               [237568, 15360000, "btrfs ROOTFS 7.3G"]],
+    "knulli": [[32768, 6291456, "FAT KNULLI 3G; its ext4 p2 is replaced by SHARE"]],
+    "mustardos": [[32768, 1048576, "FAT BOOT 512M (GPT)"],
+                  [1081344, 16777216, "ext4 ROOTFS 8G"]],
+    "rocknix": [[32768, 4194304, "FAT ROCKNIX 2G, UUID 0111-5938"],
+                [4227072, 65536, "ext4 STORAGE 32M, UUID b4434352-..."]]
+  },
+  "_dtb": "from each OS's boot.ini / extlinux.conf. ArkOS's own rk3326-rg351mp-linux.dtb drives the G350 panel wrong (white, then yellow screen; tested): it gets dArkOS's dtb, same 4.4.189 kernel tree.",
+  "dtb": {
+    "arkos": "rk3326-g350-linux.dtb",
+    "knulli": "boot/rk3326-batlexp-linux.dtb",
+    "rocknix": "rk3326-batlexp-g350.dtb"
+  },
+  "_uuids": "filesystem UUIDs inside the images (checked after flashing; AmberELEC and ROCKNIX boot by them)",
+  "uuids": {
+    "AMB_BOOT": "1910-5621",
+    "AMB_STOR": "7ab6cd9f-77f8-4d13-905e-aa8fc5baa800",
+    "RNX_BOOT": "0111-5938",
+    "RNX_STOR": "b4434352-b41f-4bef-a8d9-d81a710453da"
+  },
+  "_os_opts": "per-OS settings for this device's images",
+  "os_opts": {
+    "arkos": {"dtb_from_darkos": true},
+    "knulli": {"initrd": "boot/uInitrd"}
+  },
+  "_os_boot_ini": "OSes whose own BOOT partition gets src/boot.ini.<os> (reference only; U-Boot reads p1)",
+  "os_boot_ini": ["darkos", "arkos", "mustardos"],
+  "unique_labels": ["KNULLI", "SHARE", "ARKBOOT", "ARKROMS", "EASYROMS"],
+  "_numbers": "roles on the --plan Numbers: line; later groups only when their first role exists",
+  "numbers": [
+    ["DRK_ROMS", "DRK_BOOT", "DRK_ROOT", "MUS_BOOT", "MUS_ROOT", "MUS_ROM"],
+    ["RNX_BOOT", "RNX_STOR", "RNX_ROMS"],
+    ["KNU_BOOT", "KNU_SHARE"],
+    ["ARK_BOOT", "ARK_ROOT", "ARK_ROMS"]
+  ],
+  "_untested": "per boot mode: OSes not yet booted on a device that way (--plan warns)",
+  "untested": {"scr-g350": ["arkos", "knulli"]}
+}
