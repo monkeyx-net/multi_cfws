@@ -1,8 +1,8 @@
 {
-  "_doc": "RG CubeXX (Allwinner H700), tested with knulli + MustardOS (either default). Allwinner vendor U-Boot 2018.05: it reads partitions by GPT name (env, boot, boot-resource) and its bootcmd always ends in 'run setargs_mmc boot_normal', so the multi-boot choice is a new boot_normal in the shared env partition. It has the simple command parser (no hush: no if/then/else). Image names, src offsets/sizes (sfdisk -d <image>) and the boot package sector are tied to specific image releases.",
+  "_doc": "RG CubeXX (Allwinner H700), tested with knulli + MustardOS (either default); ROCKNIX tested on Vol+ of a 3-OS card (default, Vol- and 2-OS cards not yet). Allwinner vendor U-Boot 2018.05: it reads partitions by GPT name (env, boot, boot-resource) and its bootcmd always ends in 'run setargs_mmc boot_normal', so the multi-boot choice is a new boot_normal in the shared env partition. It has the simple command parser (no hush: no if/then/else). Image names, src offsets/sizes (sfdisk -d <image>) and the boot package sector are tied to specific image releases.",
   "name": "CubeXX",
   "soc": "H700",
-  "all_os": ["knulli", "mustardos"],
+  "all_os": ["knulli", "mustardos", "rocknix"],
   "_key_pins": "Vol-, Vol+ (PE2, PE1: bank E = 4 * 32); shown in --plan only, the env reads the PE data register",
   "key_pins": [130, 129],
   "table": "gpt",
@@ -20,7 +20,8 @@
   "env_size": 131072,
   "images": {
     "knulli": "knulli-h700-rg-cubexx-scarab-20260511.img",
-    "mustardos": "MustardOS_RGCUBEXX-H_2606.0_ANDROMEDA-db2a3bd0.img"
+    "mustardos": "MustardOS_RGCUBEXX-H_2606.0_ANDROMEDA-db2a3bd0.img",
+    "rocknix": "ROCKNIX-H700.aarch64-20261101-DDR3.img"
   },
   "_src": "partitions copied from each image, in order: [start, size, what] in sectors",
   "src": {
@@ -28,19 +29,32 @@
                [73728, 40960, "image p1: Android boot image 20M (stock 4.9.170 kernel + ramdisk)"]],
     "mustardos": [[90112, 65536, "image p2: FAT BOOT 32M (boot-resource, bootlogo.bmp)"],
                   [319488, 16777216, "image p5: ext4 rootfs 8G"],
-                  [188416, 131072, "image p4: Android boot image 64M (same kernel as knulli's)"]]
+                  [188416, 131072, "image p4: Android boot image 64M (same kernel as knulli's)"]],
+    "rocknix": [[32768, 4194304, "image p1: FAT ROCKNIX 2G (KERNEL, SYSTEM, device_trees)"],
+                [4227072, 65536, "image p2: ext4 STORAGE 32M"]]
   },
-  "_dtb": "none: both OSes boot with knulli's U-Boot dtb (bootm always passes U-Boot's own control dtb; fdt addr is ignored, tested). MustardOS's input daemon needs the input device name muOS-Input-Source, so its branch renames gpio_keys in that dtb with fdt set (tested). fatload/fatwrite mmc 0:N don't work on this U-Boot (tested)",
-  "dtb": {},
+  "_dtb": "knulli and MustardOS boot with knulli's U-Boot control dtb (bootm always passes it; plain fdt addr is ignored, tested); MustardOS's branch renames gpio_keys in it with fdt set (muinput needs muOS-Input-Source, tested). rocknix: its dtb on its FAT, fixed (os_opts dtb_fixes) and written raw to dtb_rocknix; its branch switches the control dtb to it with fdt addr -c (untested). fatload/fatwrite mmc 0:N don't work on this U-Boot (tested)",
+  "dtb": {"rocknix": "device_trees/sun50i-h700-anbernic-rgcubexx.dtb"},
   "uuids": {},
   "_os_opts": "knulli boot_files: checked on KNULLI (kernel and ramdisk are in its Android boot image).",
   "os_opts": {
-    "knulli": {"boot_files": ["boot/knulli"]}
+    "knulli": {"boot_files": ["boot/knulli"]},
+    "rocknix": {
+      "_aboot": "Android boot image built from KERNEL (mainline arm64 Image, text_offset 0: needs a 2MB-aligned load address). max_kernel: the vendor bootm's CONFIG_SYS_BOOTM_LEN (32M); the 20261101 KERNEL is 32135176 bytes",
+      "aboot": {"kernel_addr": "0x40200000", "ramdisk_addr": "0x42800000", "tags_addr": "0x40000100",
+                "page_size": 2048, "name": "rocknix", "max_kernel": "0x2000000"},
+      "_dtb_fixes": "fix_dtb: memory = /memory if missing; no_map = the vendor BL31 range (knulli's package 'monitor' at 0x48000000, reserved by its dtb's /memreserve/); free_regulator = vdd-dram (DDR3 overlay not applied: boot0 set the voltage); max_size: below the vendor control dtb's size (bootm copies that many bytes)",
+      "dtb_fixes": {"memory": ["0x40000000", "0x40000000"], "no_map": ["0x48000000", "0x1000000"],
+                    "free_regulator": "/soc/i2c@7081400/pmic@34/regulators/dcdc3",
+                    "regulator_name": "vdd-dram-vendor", "max_size": "0x20000"},
+      "disable_updates": true
+    }
   },
   "os_boot_ini": [],
-  "unique_labels": ["KNULLI", "SHARE"],
+  "unique_labels": ["KNULLI", "SHARE", "ROCKNIX", "STORAGE"],
   "numbers": [
-    ["ENV", "MUS_BOOT", "KNU_BOOT", "KNU_SHARE", "MUS_ROOT", "KNU_ABOOT", "MUS_ABOOT", "MUS_ROM"]
+    ["ENV", "MUS_BOOT", "KNU_BOOT", "KNU_SHARE", "MUS_ROOT", "KNU_ABOOT", "MUS_ABOOT", "MUS_ROM"],
+    ["RNX_BOOT", "RNX_STOR", "RNX_ROMS", "RNX_ABOOT", "RNX_DTB"]
   ],
-  "untested": {}
+  "untested": {"env-h700": ["rocknix"]}
 }

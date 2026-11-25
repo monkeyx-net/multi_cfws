@@ -7,7 +7,7 @@ for one device (3 at most: no key, Vol- and Vol+):
 |---|---|---|
 | **G350** (`--device g350`, the default) | `amberelec arkos darkos knulli mustardos rocknix` | **dArkOS G350**, even without `darkos` in `--os`. With `rocknix`: **ROCKNIX** instead |
 | **RGB30** (`--device rgb30`, see [RGB30](#rgb30)) | `arkos darkos knulli rocknix` | **knulli**, even without `knulli` in `--os` |
-| **RG CubeXX** (`--device cubexx`, tested, see [RG CubeXX](#rg-cubexx-h700)) | `knulli mustardos` | **knulli** |
+| **RG CubeXX** (`--device cubexx`, see [RG CubeXX](#rg-cubexx-h700); ROCKNIX tested on Vol+) | `knulli mustardos rocknix` | **knulli**, even without `knulli` in `--os` |
 
 The card's U-Boot is copied from that image. It must be in `img/` even if you don't
 install that OS. The script stops before touching the card if it is missing, and
@@ -365,18 +365,22 @@ What each OS needs, and what the script does about it:
 
 ## RG CubeXX (H700)
 
-`--device cubexx` builds a knulli + MustardOS card;
-ROCKNIX is not supported (see [below](#rocknix-and-the-cubexx)). Images (in `img/`):
+`--device cubexx` builds a card with 2 or 3 of knulli, MustardOS and ROCKNIX
+(ROCKNIX tested on Vol+ of a three-OS card, see [ROCKNIX on the CubeXX](#rocknix-and-the-cubexx)).
+Images (in `img/`):
 
 - `knulli-h700-rg-cubexx-scarab-20260511.img` (always needed: the U-Boot comes from it)
 - `MustardOS_RGCUBEXX-H_2606.0_ANDROMEDA-db2a3bd0.img`
+- `ROCKNIX-H700.aarch64-20261101-DDR3.img` (only its kernel, dtb and system are used,
+  not its DDR3 U-Boot)
 
 ```sh
 python3 src/flash-dualboot.py --plan --device cubexx --os knulli,mustardos
 sudo python3 src/flash-dualboot.py --device cubexx --os knulli,mustardos --default mustardos /dev/sdb
 ```
 
-The `--default` OS boots with no key held; hold **Vol-** at power-on for the other one.
+The `--default` OS boots with no key held; hold **Vol-** at power-on for the next one
+(in the order knulli, MustardOS, ROCKNIX) and **Vol+** for the third.
 
 ### How it works (CubeXX)
 
@@ -421,13 +425,45 @@ with `fw_printenv` (from `uboot-tools`, with a config line `/dev/sdX1 0x0 0x2000
 
 ### ROCKNIX and the CubeXX
 
-ROCKNIX's H700 image has its own mainline U-Boot (a different build for DDR3 and
-DDR4) and a mainline kernel. That U-Boot cannot start Android boot images, and the
-vendor U-Boot probably can't start ROCKNIX's kernel. Adding ROCKNIX to this card would
-need one U-Boot that boots both kernel families, which hasn't been tried. Until then,
-ROCKNIX goes on its own card:
+**Tested** with all three OSes, default knulli, ROCKNIX on Vol+: ROCKNIX boots to its
+interface, and controls, sound, Wi-Fi, reboot and power-off work. ROCKNIX's own U-Boot (mainline) can't start knulli's or
+MustardOS's Android boot images, so on this card ROCKNIX's mainline kernel is started by
+the same vendor U-Boot. The script:
 
-### Which ROCKNIX image: DDR3 or DDR4
+- builds an Android boot image from ROCKNIX's `KERNEL` (its initramfs is built in),
+  loaded at 0x40200000 (a mainline kernel needs a 2 MB-aligned address), into `boot` /
+  `boot_rocknix`. The vendor `bootm` takes at most 32 MB of kernel; the 20261101 kernel
+  is 32.1 MB, so a newer ROCKNIX may not fit (the script stops if so);
+- writes ROCKNIX's CubeXX dtb (`device_trees/sun50i-h700-anbernic-rgcubexx.dtb`) to the
+  raw partition `dtb_rocknix`, with three fixes (`fix_dtb`): a `/memory` node, the
+  vendor firmware's memory (0x48000000, 16 MB) reserved, and the DRAM regulator's fixed
+  voltage removed (the vendor boot0 already set it for DDR3 or DDR4), renamed so
+  ROCKNIX's updater doesn't recognise it;
+- switches U-Boot's dtb to ROCKNIX's (`fdt addr -c`) just before `bootm`, and resets the
+  display engine: the vendor U-Boot leaves it showing its logo, which otherwise stays on
+  screen while ROCKNIX runs (tested). If `bootm` fails, it switches both back so the
+  default OS can still boot;
+- copies ROCKNIX's FAT (label `ROCKNIX`) and STORAGE (`STORAGE`, grown to 8G) and adds a
+  `GAMES` partition (`system.gamesdevice` points at it). ROCKNIX finds them by label.
+
+Known limits:
+
+- **No ROCKNIX updates.** An update would replace `KERNEL`/`SYSTEM` but not the boot
+  image built from the old `KERNEL`, and its updater would write ROCKNIX's own U-Boot
+  over the card's boot area, after which only ROCKNIX boots. The script sets
+  `updates.enabled=0`; rebuild the card for a new ROCKNIX.
+- **Release Vol- once the logo shows** when ROCKNIX is the Vol- OS: ROCKNIX starts its
+  USB recovery mode if Vol- is still held when its init runs.
+- With ROCKNIX as default, the boot logo is knulli's (or MustardOS's): ROCKNIX's FAT has
+  no `bootlogo.bmp`.
+- Not yet checked: suspend, ROCKNIX as default or on Vol-, and the two-OS cards. If ROCKNIX doesn't start,
+  the default OS boots instead (or, with ROCKNIX as default, nothing).
+
+### ROCKNIX on its own card (CubeXX)
+
+ROCKNIX alone, with its own U-Boot:
+
+#### Which ROCKNIX image: DDR3 or DDR4
 
 ROCKNIX has two H700 images, `ROCKNIX-H700.aarch64-<date>-DDR3.img.gz` and
 `-DDR4.img.gz`, because its U-Boot must match the device's RAM (the "DDR4" image is
@@ -449,7 +485,7 @@ Look at the `vdd-dram` line (the stock kernel may name it differently, e.g. `dcd
 
 If unsure, try the DDR4 image first; the wrong one just doesn't boot (black screen).
 
-### Installing ROCKNIX on the RG CubeXX
+#### Installing ROCKNIX on its own card
 
 From ROCKNIX's [H700 installation guide](https://rocknix.org/configure/h700-installation/).
 H700 devices need these manual steps once, after flashing a new image and before the

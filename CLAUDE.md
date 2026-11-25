@@ -3,7 +3,7 @@
 Builds a multi-boot SD card with 2 or 3 OSes for one device (`--device`). `--os` is
 required and must name them; there is no "all" default:
 the G350 (RK3326; dArkOS, AmberELEC, ArkOS, knulli, MustardOS, ROCKNIX; the default), the
-RGB30 (RK3566; dArkOS, ArkOS, knulli, ROCKNIX) or the RG CubeXX (H700; knulli, MustardOS). Everything lives in `src/`: `flash-dualboot.py` (Python 3.8+,
+RGB30 (RK3566; dArkOS, ArkOS, knulli, ROCKNIX) or the RG CubeXX (H700; knulli, MustardOS, ROCKNIX). Everything lives in `src/`: `flash-dualboot.py` (Python 3.8+,
 standard library only), one JSON file per device (`devices/`), the boot command templates
 (`boot/`), its three G350 boot.ini templates and the `multiboot-next` template.
 `README.md` is the user-facing documentation; keep it in sync when the layout, CLI or key
@@ -46,8 +46,9 @@ printed `Numbers:` line.
 For the G350 with ROCKNIX, also run the 6 combinations of 2–3 OSes that include
 `rocknix` (at most 3 OSes: no key + 2 keys).
 
-For the CubeXX, run `--device cubexx --os knulli,mustardos` with each default (the
-same sfdisk check). Without root, the env code can be checked against the images
+For the CubeXX, run `--device cubexx` for `knulli,mustardos`, `knulli,rocknix`,
+`mustardos,rocknix` and `knulli,mustardos,rocknix` with each default (the same sfdisk
+check; `knulli,mustardos` output must not change when adding ROCKNIX features). Without root, the env code can be checked against the images
 (`env_read`/`env_build`); `fw_printenv -l /tmp -c <config>` reads a
 built env (config line `<file> 0x0 0x20000`).
 
@@ -195,18 +196,49 @@ the GPT layout below then replaced that).
 - **`fatload`/`fatwrite mmc 0:N` don't work** (tested: no file written); `sunxi_flash
   read <addr> <partname>` does. Data U-Boot must read goes in a raw, named partition.
 - **Partitions the ramdisks hard-code**: knulli `/dev/mmcblk0p3` (KNULLI) with SHARE =
-  p4; MustardOS `/dev/mmcblk0p5` (ROOTFS). MustardOS ROMS last. `layout_cubexx` checks this.
+  p4; MustardOS `/dev/mmcblk0p5` (ROOTFS). MustardOS ROMS last. `layout_cubexx` checks this;
+  without knulli, ROCKNIX's FAT/STORAGE fill p3/p4, so MustardOS ROOTFS stays p5. U-Boot
+  and env always come from the knulli image.
 - **Android boot images** (`KNU_ABOOT`, `MUS_ABOOT`, the extra entries in each OS's
   `copied`): the default OS's is named `boot`, the other `boot_<os>` (`aboot_name`).
-  The default OS's FAT partition is named `boot-resource` (U-Boot's `bootlogo.bmp`).
-- **Both OSes use knulli's U-Boot dtb.** `bootm` always passes U-Boot's control dtb
-  (`fdt addr` to another dtb is ignored, tested; `fdt addr -c` would skip the startup
+  The default OS's FAT partition is named `boot-resource` (U-Boot's `bootlogo.bmp`); with
+  ROCKNIX as default, knulli's (else MustardOS's), as ROCKNIX's FAT has no bootlogo.
+- **knulli and MustardOS use knulli's U-Boot dtb.** `bootm` always passes U-Boot's control
+  dtb (`fdt addr` to another dtb is ignored, tested; `fdt addr -c` would skip the startup
   fixups). MustardOS's `muinput` needs the input device name `muOS-Input-Source`, so its
   branch renames `/soc@03000000/gpio_keys` with `fdt set` (no `fdt addr`, no resize;
   tested: controls work). Fallback if that ever fails: `MUOS_INPUT_SOURCE_NAME` on
   muinput's line in MustardOS's `module.sh`.
-- ROCKNIX: its H700 image has a mainline U-Boot (DDR3/DDR4 builds) that can't start
-  Android boot images; not supported on this card.
+- **ROCKNIX (tested on Vol+ of a 3-OS card, default knulli: interface, controls, sound,
+  Wi-Fi, reboot, power-off; untested: suspend, default/Vol- ROCKNIX, 2-OS cards)**: its mainline U-Boot can't start Android boot images,
+  so the vendor U-Boot starts its mainline kernel (`os_opts.rocknix`, `Rocknix.write_vendor_boot`):
+  - `KERNEL` (arm64 Image, text_offset 0, initramfs built in) goes in an Android v0 image
+    built by `android_boot_image` (same bytes as mkbootimg; kernel_addr 0x40200000,
+    2 MB-aligned; no ramdisk; empty cmdline: the vendor bootm appends the header cmdline
+    to `bootargs`, which the branch sets). The vendor bootm takes at most 32 MB of kernel
+    (`max_kernel`, CONFIG_SYS_BOOTM_LEN); the 20261101 KERNEL is 32135176 bytes.
+  - Its CubeXX dtb goes raw in `dtb_rocknix` (`RNX_DTB`, 1M, read whole to 0x43000000,
+    below the 0x44000000 bootm copies the dtb to), fixed by `fix_dtb` (fdtput): `/memory`
+    added, the vendor BL31 (0x48000000, 16M, knulli package 'monitor') reserved no-map, and
+    vdd-dram's min/max removed and the regulator renamed (vendor boot0 set the DRAM voltage;
+    ROCKNIX's update.sh writes its own U-Boot at sector 16 when it finds vdd-dram at
+    1.1/1.2 V). The DDR3 overlay is not applied.
+  - `mb_rocknix` reads both, sets bootargs (boot by LABEL: no clash with KNULLI, SHARE,
+    BOOT, ROOTFS), then `fdt addr` + `fdt addr -c` to ROCKNIX's dtb (bootm writes initrd
+    props to working_fdt, then passes gd->fdt_blob, copied gd->fdt_size bytes), `bootm`,
+    and if that returns, both back to `${fdtcontroladdr}` for the fallback OS. Tested: the
+    kernel boots (LED heartbeat via fdt set on led-1) and `fdt addr -c` + bootm works.
+  - **`fdt resize 1000`** after `fdt addr 43000000`: without free space in the dtb, bootm's
+    fixups fail and this U-Boot stops ("FDT creation failed! hanging...", tested twice:
+    the kernel never ran).
+  - **Display engine reset** (`mw.l 0300160c 1`, CCU DE_BGR_REG reset low, before bootm):
+    the vendor U-Boot leaves DE33 running its logo setup, which overrides the mainline
+    driver (DRM reported the panel active, backlight on, Sway running, screen still showed
+    the logo; tested). With the reset ROCKNIX's interface appears. Released again
+    (`10001`) if bootm returns.
+  - `updates.enabled=0` (updates replace KERNEL/SYSTEM but not the boot image, and
+    update.sh writes ROCKNIX's U-Boot). `install_next` only with `c.scr`. ROCKNIX's
+    initramfs enters USB recovery if Vol- is still held.
 
 ## One-shot next boot (`multiboot-next`)
 

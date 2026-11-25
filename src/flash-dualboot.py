@@ -18,11 +18,13 @@ from __future__ import annotations
 
 import glob
 import gzip
+import hashlib
 import json
 import os
 import re
 import shutil
 import stat
+import struct
 import subprocess
 import sys
 import tempfile
@@ -46,6 +48,8 @@ AMB_BOOT_SIZE = 2 * GIB          # partition sizes on the card (AmberELEC's are 
 AMB_STOR_SIZE = 8 * GIB
 RNX_STOR_SIZE = 8 * GIB
 BOOTSEL_SIZE = 64 * MIB
+RNX_ABOOT_SIZE = 48 * MIB        # CubeXX: read to 0x45000000, must end below BL31 (0x48000000)
+RNX_DTB_SIZE = 1 * MIB           # CubeXX: read whole to 0x43000000 (below 0x44000000)
 DRK_BOOT_SIZE = 100 * MIB
 DRK_ROOT_SIZE = 12 * GIB
 ARK_ROOT_SIZE = 12 * GIB         # ArkOS's own first boot grows its ext4 to ~11GB
@@ -593,32 +597,70 @@ def aboot_name(c: Choices, os_key: str) -> str:
     return "boot" if os_key == c.default else f"boot_{os_key}"
 
 
+def dtb_part_name(os_key: str) -> str:
+    """CubeXX: GPT name of the raw partition holding an OS's own dtb (read by sunxi_flash)."""
+    return f"dtb_{os_key}"
+
+
 def layout_cubexx(c: Choices, lay: Layout):
     """GPT, vendor U-Boot (env-h700). Both ramdisks hard-code their partitions: knulli's
     mounts /dev/mmcblk0p3 (KNULLI) and takes p4 as SHARE, MustardOS's mounts
     /dev/mmcblk0p5 (ROOTFS). U-Boot finds the rest by GPT name: "env" (shared), the
-    Android boot images (aboot_name) and "boot-resource" (bootlogo.bmp: the default OS's
-    FAT partition). MustardOS finds BOOT and ROMS through its storage num files."""
+    Android boot images (aboot_name), ROCKNIX's dtb (dtb_part_name) and "boot-resource"
+    (bootlogo.bmp). MustardOS finds BOOT and ROMS through its storage num files. ROCKNIX
+    (labels ROCKNIX/STORAGE) fills p2 or p3/p4 when knulli or MustardOS is missing."""
     src = c.device.src
-    if not (c.sel("knulli") and c.sel("mustardos")):
-        die("internal: the CubeXX layout needs knulli and MustardOS")
-    res = lambda os_key, name: "boot-resource" if c.default == os_key else name
+    # "boot-resource": where U-Boot finds bootlogo.bmp, the default OS's FAT. ROCKNIX's has
+    # none, so with ROCKNIX as default it is knulli's (else MustardOS's); both OSes find
+    # their FAT by number, not by name.
+    logo = c.default if c.default != "rocknix" else ("knulli" if c.sel("knulli") else "mustardos")
+    res = lambda os_key, name: "boot-resource" if logo == os_key else name
+
+    def rocknix_boot():
+        lay.gpt(src["rocknix"][0].size, T_DATA, res("rocknix", "rocknix"),
+                "FAT ROCKNIX: ROCKNIX KERNEL/SYSTEM", "RNX_BOOT")
+
+    def rocknix_stor():
+        lay.gpt(RNX_STOR_SIZE, T_LINUX, "storage", "ext4 STORAGE: ROCKNIX /storage", "RNX_STOR")
+
     lay.gpt(c.device.env_src[1], T_LINUX, "env", "U-Boot env: shared, boot_normal picks the OS", "ENV")
-    lay.gpt(src["mustardos"][0].size, T_DATA, res("mustardos", "mus-boot"),
-            "FAT BOOT: MustardOS bootlogo", "MUS_BOOT")
-    lay.gpt(src["knulli"][0].size, T_DATA, res("knulli", "knulli"),
-            "FAT KNULLI: knulli squashfs + bootlogo", "KNU_BOOT")
-    lay.gpt(lay.rom_size(), T_DATA, "SHARE", "exFAT SHARE: knulli /userdata (roms)", "KNU_SHARE", rom=True)
-    lay.gpt(src["mustardos"][1].size, T_LINUX, "rootfs", "ext4 ROOTFS: MustardOS root", "MUS_ROOT")
-    lay.gpt(src["knulli"][1].size, T_LINUX, aboot_name(c, "knulli"),
-            "Android boot image: knulli kernel + ramdisk", "KNU_ABOOT")
-    lay.gpt(src["mustardos"][2].size, T_LINUX, aboot_name(c, "mustardos"),
-            "Android boot image: MustardOS kernel + ramdisk", "MUS_ABOOT")
-    # MustardOS ROMS MUST be the last partition (its factory reset resizes it to 100%).
-    lay.gpt(lay.rom_size(), T_DATA, "roms", "exFAT ROMS: MustardOS roms (last)", "MUS_ROM", rom=True)
+    if c.sel("mustardos"):
+        lay.gpt(src["mustardos"][0].size, T_DATA, res("mustardos", "mus-boot"),
+                "FAT BOOT: MustardOS bootlogo", "MUS_BOOT")
+    else:
+        rocknix_boot()                                    # p2 (knulli + ROCKNIX)
+    if c.sel("knulli"):
+        lay.gpt(src["knulli"][0].size, T_DATA, res("knulli", "knulli"),
+                "FAT KNULLI: knulli squashfs + bootlogo", "KNU_BOOT")
+        lay.gpt(lay.rom_size(), T_DATA, "SHARE", "exFAT SHARE: knulli /userdata (roms)", "KNU_SHARE", rom=True)
+    else:
+        rocknix_boot(); rocknix_stor()                    # p3/p4 (MustardOS + ROCKNIX)
+    if c.sel("mustardos"):
+        lay.gpt(src["mustardos"][1].size, T_LINUX, "rootfs", "ext4 ROOTFS: MustardOS root", "MUS_ROOT")
+    if c.sel("knulli"):
+        lay.gpt(src["knulli"][1].size, T_LINUX, aboot_name(c, "knulli"),
+                "Android boot image: knulli kernel + ramdisk", "KNU_ABOOT")
+    if c.sel("mustardos"):
+        lay.gpt(src["mustardos"][2].size, T_LINUX, aboot_name(c, "mustardos"),
+                "Android boot image: MustardOS kernel + ramdisk", "MUS_ABOOT")
+    if c.sel("rocknix"):
+        if "RNX_BOOT" not in lay.n:
+            rocknix_boot()
+        if "RNX_STOR" not in lay.n:
+            rocknix_stor()
+        lay.gpt(RNX_ABOOT_SIZE, T_LINUX, aboot_name(c, "rocknix"),
+                "Android boot image: ROCKNIX KERNEL (built by the script)", "RNX_ABOOT")
+        lay.gpt(RNX_DTB_SIZE, T_LINUX, dtb_part_name("rocknix"),
+                "raw dtb: ROCKNIX CubeXX dtb (fixed for the vendor firmware)", "RNX_DTB")
+        lay.gpt(lay.rom_size(), T_DATA, "games", "exFAT GAMES: ROCKNIX roms", "RNX_ROMS", rom=True)
+    if c.sel("mustardos"):
+        # MustardOS ROMS MUST be the last partition (its factory reset resizes it to 100%).
+        lay.gpt(lay.rom_size(), T_DATA, "roms", "exFAT ROMS: MustardOS roms (last)", "MUS_ROM", rom=True)
     n = lay.n
-    if (n["KNU_BOOT"], n["KNU_SHARE"], n["MUS_ROOT"]) != (3, 4, 5):
-        die("internal: knulli must be p3/p4 and MustardOS ROOTFS p5")
+    if c.sel("knulli") and (n["KNU_BOOT"], n["KNU_SHARE"]) != (3, 4):
+        die("internal: knulli must be p3/p4")
+    if c.sel("mustardos") and (n["MUS_ROOT"] != 5 or n["MUS_ROM"] != max(lay.numbered())):
+        die("internal: MustardOS ROOTFS must be p5 and ROMS last")
 
 
 # The layout functions by name ("layout" in src/devices/<device>.json). The partition
@@ -655,6 +697,9 @@ class OS:
             die(f"{self.name} has no boot commands for boot mode {c.bootmode} ({path})")
         return fill(read(path), **self.boot_values(c))
 
+    def tools_for(self, c) -> tuple:
+        return self.tools
+
     def boot_values(self, c: Choices) -> dict:
         v = {"BOOTX": hx(c.n(f"{self.prefix}_BOOT")), "DTB": c.device.dtb.get(self.key, "")}
         root = c.lay.n.get(f"{self.prefix}_ROOT")
@@ -662,6 +707,8 @@ class OS:
             v.update(ROOT=root, ROOT_PU=c.partuuid(root))
         if f"{self.prefix}_ABOOT" in c.lay.n:
             v.update(ABOOT=aboot_name(c, self.key))
+        if f"{self.prefix}_DTB" in c.lay.n:
+            v.update(DTBPART=dtb_part_name(self.key))
         return v
 
     def copy(self, c: Choices):
@@ -994,6 +1041,9 @@ class Rocknix(OS):
         """G350: /extlinux/extlinux.conf.dualboot on ROCKNIX's FAT partition."""
         return fill(read(f"{BOOT_DIR}/rocknix.extlinux.conf"), **self.boot_values(c))
 
+    def tools_for(self, c) -> tuple:
+        return self.tools + (("fdtput", "fdtget") if c.device.opt(self.key, "aboot") else ())
+
     def fix_fs(self, c):
         log("ROCKNIX STORAGE: fsck + grow to 8G + remove .please_resize_me")
         grow_storage(c.part("RNX_STOR"))
@@ -1028,17 +1078,55 @@ class Rocknix(OS):
                      if not ln.startswith(("system.gamesdevice=", "system.automount="))]
             lines += ["system.automount=1",
                       f"system.gamesdevice=/dev/disk/by-partuuid/{c.partuuid(c.n('RNX_ROMS'))}"]
+            if c.device.opt(self.key, "disable_updates"):
+                # An update replaces KERNEL/SYSTEM but not the Android boot image built
+                # below, and its update.sh writes ROCKNIX's own U-Boot over the boot area.
+                lines = [ln for ln in lines if not ln.startswith("updates.enabled=")]
+                lines += ["updates.enabled=0"]
             write(cfg, "\n".join(lines) + "\n")
-            print("\n".join(grep_n(cfg, r"^system\.(automount|gamesdevice)=")))
+            print("\n".join(grep_n(cfg, r"^(system\.(automount|gamesdevice)|updates\.enabled)=")))
 
             if c.bootmode == "scr-g350":
                 conf = f"{boot}/extlinux/extlinux.conf.dualboot"
                 write(conf, self.extlinux(c))
                 print("--- ROCKNIX extlinux.conf.dualboot:")
                 print(read(conf), end="")
-            install_next(c, "rocknix", stor)                 # /storage
+            if c.device.opt(self.key, "aboot"):
+                self.write_vendor_boot(c, boot)
+            if c.scr:
+                install_next(c, "rocknix", stor)             # /storage
+
+    def write_vendor_boot(self, c, boot: str):
+        """CubeXX (vendor U-Boot): KERNEL in an Android boot image (RNX_ABOOT) and the
+        device's dtb, fixed for that U-Boot's firmware, raw in RNX_DTB."""
+        o = c.device.opt(self.key, "aboot")
+        kernel = open(f"{boot}/KERNEL", "rb").read()
+        limit = int(o["max_kernel"], 0)
+        if len(kernel) > limit:
+            die(f"ROCKNIX KERNEL is {len(kernel)} bytes; the vendor U-Boot's bootm takes at most {limit}")
+        image = android_boot_image(kernel, o)
+        if len(image) > RNX_ABOOT_SIZE * S:
+            die(f"ROCKNIX boot image ({len(image)} bytes) does not fit in {RNX_ABOOT_SIZE * S}")
+        log(f"ROCKNIX: KERNEL ({len(kernel)} bytes, bootm limit {limit}) -> Android boot image "
+            f"on {c.part('RNX_ABOOT')}")
+        write_raw(c.part("RNX_ABOOT"), image)
+
+        dtb = f"{c.mnt}/rocknix.dtb"
+        shutil.copyfile(f"{boot}/{c.device.dtb['rocknix']}", dtb)
+        fix_dtb(dtb, c.device.opt(self.key, "dtb_fixes"))
+        blob = open(dtb, "rb").read()
+        limit = int(c.device.opt(self.key, "dtb_fixes")["max_size"], 0)
+        if len(blob) > min(limit, RNX_DTB_SIZE * S):
+            die(f"ROCKNIX dtb is {len(blob)} bytes, more than {limit}")
+        log(f"ROCKNIX: {c.device.dtb['rocknix']} ({len(blob)} bytes, fixed) -> {c.part('RNX_DTB')}")
+        write_raw(c.part("RNX_DTB"), blob)
 
     def verify(self, c):
+        for role, magic in (("RNX_ABOOT", b"ANDROID!"), ("RNX_DTB", bytes.fromhex("d00dfeed"))):
+            if role in c.lay.n:
+                with open(c.part(role), "rb") as f:
+                    if f.read(len(magic)) != magic:
+                        die(f"{c.part(role)}: no {magic!r} at its start")
         check_label(c, "RNX_BOOT", "ROCKNIX")
         check_label(c, "RNX_STOR", "STORAGE")
         check_label(c, "RNX_ROMS", "GAMES")
@@ -1469,7 +1557,7 @@ def preflight(c: Choices):
     if c.scr:
         tools += ["mkimage"]                       # boot.cmd -> boot.scr
     for o in c.oses:
-        tools += o.tools
+        tools += o.tools_for(c)
     for t in dict.fromkeys(tools):
         if not shutil.which(t):
             die(f"missing tool: {t}")
@@ -1582,6 +1670,53 @@ def flash(c: Choices, boot_cfg: str):
         run(["udisksctl", "power-off", "-b", dev], check=False, stderr=subprocess.DEVNULL)
     log("Done. Card is safe to remove.")
     show_plan(c)
+
+
+def write_raw(part: str, data: bytes):
+    """Write data to the start of a raw partition."""
+    with open(part, "r+b") as f:
+        f.write(data)
+        f.flush()
+        os.fsync(f.fileno())
+
+
+def android_boot_image(kernel: bytes, o: dict) -> bytes:
+    """Android boot image, header v0, kernel only (empty cmdline: bootargs come from the
+    env). Same layout and id as mkbootimg: header and kernel each padded to page_size."""
+    page = o["page_size"]
+    ident = hashlib.sha1(kernel + struct.pack("<I", len(kernel)) + struct.pack("<I", 0)
+                         + struct.pack("<I", 0)).digest()
+    head = struct.pack("<8s10I16s512s32s1024s", b"ANDROID!", len(kernel), int(o["kernel_addr"], 0),
+                       0, int(o["ramdisk_addr"], 0), 0, 0, int(o["tags_addr"], 0), page, 0, 0,
+                       o["name"].encode(), b"", ident, b"")
+    pad = lambda b: b + bytes(-len(b) % page)
+    return pad(head) + pad(kernel)
+
+
+def fix_dtb(path: str, fixes: dict):
+    """CubeXX ROCKNIX dtb under the vendor boot chain (fdtput edits in place):
+    - a /memory node if it has none (the vendor bootm only updates the memory banks);
+    - its vendor BL31 range as a no-map reserved-memory node (the dtb only reserves
+      mainline TF-A's);
+    - the DRAM regulator's min/max voltage removed and the regulator renamed: the
+      vendor boot0 trained the DRAM at its own voltage (DDR3 or DDR4), which the
+      kernel then leaves alone, and ROCKNIX's update.sh, which picks a U-Boot to write
+      over the boot area by that name and voltage, finds none."""
+    nodes = run(["fdtget", "-l", path, "/"], capture_output=True, text=True).stdout.split()
+    if not any(n == "memory" or n.startswith("memory@") for n in nodes):
+        base, size = fixes["memory"]
+        node = f"/memory@{int(base, 0):x}"
+        run(["fdtput", "-c", path, node])
+        run(["fdtput", "-t", "s", path, node, "device_type", "memory"])
+        run(["fdtput", "-t", "x", path, node, "reg", "0", f"{int(base, 0):x}", "0", f"{int(size, 0):x}"])
+    base, size = fixes["no_map"]
+    node = f"/reserved-memory/firmware@{int(base, 0):x}"
+    run(["fdtput", "-c", path, node])
+    run(["fdtput", "-t", "x", path, node, "reg", "0", f"{int(base, 0):x}", "0", f"{int(size, 0):x}"])
+    run(["fdtput", path, node, "no-map"])                      # empty property
+    reg = fixes["free_regulator"]
+    run(["fdtput", "-d", path, reg, "regulator-min-microvolt", "regulator-max-microvolt"])
+    run(["fdtput", "-t", "s", path, reg, "regulator-name", fixes["regulator_name"]])
 
 
 def copy_from_darkos_boot(c: Choices, name: str, dst_dir: str):
