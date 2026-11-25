@@ -7,7 +7,7 @@ for one device (3 at most: no key, Vol- and Vol+):
 |---|---|---|
 | **G350** (`--device g350`, the default) | `amberelec arkos darkos knulli mustardos rocknix` | **dArkOS G350**, even without `darkos` in `--os`. With `rocknix`: **ROCKNIX** instead |
 | **RGB30** (`--device rgb30`, see [RGB30](#rgb30)) | `arkos darkos knulli rocknix` | **knulli**, even without `knulli` in `--os` |
-| **RG CubeXX** (`--device cubexx`, tested with default MustardOS, see [RG CubeXX](#rg-cubexx-h700)) | `knulli mustardos` | **knulli** |
+| **RG CubeXX** (`--device cubexx`, tested, see [RG CubeXX](#rg-cubexx-h700)) | `knulli mustardos` | **knulli** |
 
 The card's U-Boot is copied from that image. It must be in `img/` even if you don't
 install that OS. The script stops before touching the card if it is missing, and
@@ -412,10 +412,9 @@ looks for the input device name `muOS-Input-Source`, which knulli's device tree 
 
 Run `--plan` to see the layout and the env variables.
 
-Tested on a CubeXX (DDR3) with default MustardOS: the 16-entry GPT survives, the env
-is read, no key boots MustardOS (with working controls) and Vol- boots knulli. Not yet
-tried: default knulli (Vol- then boots MustardOS), and a card built in one go with this
-version (the test card had its env and sectors 6–511 fixed by hand).
+Tested on a CubeXX (DDR3), on a card built by this script, with either default: the
+16-entry GPT survives, the env is read, no key boots the default OS and Vol- the
+other, and MustardOS's controls work.
 
 If nothing boots, the card can be checked on a PC: the env is in p1 and is readable
 with `fw_printenv` (from `uboot-tools`, with a config line `/dev/sdX1 0x0 0x20000`).

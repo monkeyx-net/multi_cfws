@@ -1,5 +1,5 @@
 {
-  "_doc": "RG CubeXX (Allwinner H700). UNTESTED on a device. Allwinner vendor U-Boot 2018.05: it reads partitions by GPT name (env, boot, boot-resource) and its bootcmd always ends in 'run setargs_mmc boot_normal', so the multi-boot choice is a new boot_normal in the shared env partition. It has the simple command parser (no hush: no if/then/else). Image names, src offsets/sizes (sfdisk -d <image>) and the boot package sector are tied to specific image releases.",
+  "_doc": "RG CubeXX (Allwinner H700), tested with knulli + MustardOS (either default). Allwinner vendor U-Boot 2018.05: it reads partitions by GPT name (env, boot, boot-resource) and its bootcmd always ends in 'run setargs_mmc boot_normal', so the multi-boot choice is a new boot_normal in the shared env partition. It has the simple command parser (no hush: no if/then/else). Image names, src offsets/sizes (sfdisk -d <image>) and the boot package sector are tied to specific image releases.",
   "name": "CubeXX",
   "soc": "H700",
   "all_os": ["knulli", "mustardos"],
@@ -42,5 +42,5 @@
   "numbers": [
     ["ENV", "MUS_BOOT", "KNU_BOOT", "KNU_SHARE", "MUS_ROOT", "KNU_ABOOT", "MUS_ABOOT", "MUS_ROM"]
   ],
-  "untested": {"env-h700": ["knulli", "mustardos"]}
+  "untested": {}
 }

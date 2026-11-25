@@ -3,8 +3,7 @@
 Builds a multi-boot SD card with 2 or 3 OSes for one device (`--device`). `--os` is
 required and must name them; there is no "all" default:
 the G350 (RK3326; dArkOS, AmberELEC, ArkOS, knulli, MustardOS, ROCKNIX; the default), the
-RGB30 (RK3566; dArkOS, ArkOS, knulli, ROCKNIX) or the RG CubeXX (H700; knulli, MustardOS;
-tested with default MustardOS). Everything lives in `src/`: `flash-dualboot.py` (Python 3.8+,
+RGB30 (RK3566; dArkOS, ArkOS, knulli, ROCKNIX) or the RG CubeXX (H700; knulli, MustardOS). Everything lives in `src/`: `flash-dualboot.py` (Python 3.8+,
 standard library only), one JSON file per device (`devices/`), the boot command templates
 (`boot/`), its three G350 boot.ini templates and the `multiboot-next` template.
 `README.md` is the user-facing documentation; keep it in sync when the layout, CLI or key
@@ -180,7 +179,7 @@ the GPT layout below then replaced that).
   has 16 entries (`gpt_entries`, sfdisk `table-length: 16`, sectors 2–5; at most 56 end
   before sector 16; MustardOS's image has 8). The boot ROM tries sector 16 before 512, so
   `flash` zeroes from the end of the table (`table_end`) to U-Boot: a stale ROCKNIX SPL
-  there gave a black screen (tested). Tested with default MustardOS: the GPT survives, the
+  there gave a black screen (tested). Tested with either default: the GPT survives, the
   env is read, both OSes boot (`boot_knulli`, `boot`). It finds partitions
   by **GPT name** and replaces `bootcmd` with `run setargs_mmc boot_normal` itself, so the
   multi-boot is a new `boot_normal` (+ `mb_keys`, `mb_<os>`) in the shared `env`
