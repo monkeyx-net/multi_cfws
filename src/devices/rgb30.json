@@ -38,7 +38,7 @@
   "uuids": {},
   "os_opts": {
     "arkos": {"patch_initrd": true, "aspect_ratio_index": "22"},
-    "knulli": {"initrd": "boot/initrd.lz4"}
+    "knulli": {"boot_files": ["boot/linux", "boot/initrd.lz4"]}
   },
   "os_boot_ini": [],
   "unique_labels": ["KNULLI", "SHARE", "ARKBOOT", "ARKROMS", "EASYROMS", "ROCKNIX", "STORAGE"],

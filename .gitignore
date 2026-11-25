@@ -9,3 +9,4 @@
 boot.ini.generated
 boot.cmd.generated
 __pycache__/
+boot.env.generated

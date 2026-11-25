@@ -26,6 +26,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import zlib
 from contextlib import contextmanager
 from dataclasses import dataclass
 
@@ -45,6 +46,7 @@ AMB_BOOT_SIZE = 2 * GIB          # partition sizes on the card (AmberELEC's are 
 AMB_STOR_SIZE = 8 * GIB
 RNX_STOR_SIZE = 8 * GIB
 BOOTSEL_SIZE = 64 * MIB
+MUS_DTB_SIZE = 1 * MIB           # CubeXX: MustardOS's U-Boot dtb (raw)
 DRK_BOOT_SIZE = 100 * MIB
 DRK_ROOT_SIZE = 12 * GIB
 ARK_ROOT_SIZE = 12 * GIB         # ArkOS's own first boot grows its ext4 to ~11GB
@@ -89,6 +91,9 @@ class Device:
     unique_labels: tuple         # labels that must not appear twice on the card
     numbers: tuple               # role groups on the --plan "Numbers:" line
     untested: dict               # bootmode -> OSes not yet booted that way
+    env_src: tuple = ()          # env-* boot modes: [start, size] of the U-Boot env partition
+    env_size: int = 0            # in the uboot_os image, and the env's size in bytes
+    gpt_entries: int = 0         # GPT entry array length (0: sfdisk's 128, sectors 2-33)
 
     @property
     def gpt(self) -> bool:
@@ -119,6 +124,7 @@ def load_device(key: str, imgdir: str) -> Device:
     dev = Device(key=key, **{**d,
         "all_os": tuple(d["all_os"]), "key_pins": tuple(d["key_pins"]),
         "uboot_sectors": tuple(d["uboot_sectors"]), "boot": tuple(d["boot"]),
+        "env_src": tuple(d.get("env_src", ())),
         "images": {o: f"{imgdir}/{f}" for o, f in d["images"].items()},
         "src": {o: tuple(Src(p[0], p[1]) for p in parts) for o, parts in d["src"].items()},
         "os_boot_ini": tuple(d["os_boot_ini"]), "unique_labels": tuple(d["unique_labels"]),
@@ -130,6 +136,8 @@ def load_device(key: str, imgdir: str) -> Device:
         die(f"{path}: table must be mbr or gpt")
     if not dev.boot or "if" in dev.boot[-1]:
         die(f"{path}: the last boot rule must have no \"if\"")
+    if any(r["bootmode"].startswith("env-") for r in dev.boot) and not (dev.env_src and dev.env_size):
+        die(f"{path}: env-* boot modes need env_src and env_size")
     return dev
 
 
@@ -314,6 +322,11 @@ class Choices:
         return os_key in self.user_os
 
     @property
+    def scr(self) -> bool:
+        """boot.scr modes: boot.cmd on BOOTSEL, compiled with mkimage, with multiboot-next."""
+        return self.bootmode.startswith("scr-")
+
+    @property
     def oses(self) -> list:
         """The selected OS objects, in the order the flashing steps handle them."""
         return [o for o in ALL_OSES if self.sel(o.key)]
@@ -366,7 +379,8 @@ class Part:
 class Layout:
     """Builds the sfdisk script one partition at a time, keeping its own position."""
 
-    def __init__(self, c: Choices, header: str, first_logical: int, gap: int, rom_sizes: list):
+    def __init__(self, c: Choices, header: str, first_logical: int, gap: int, rom_sizes):
+        """rom_sizes None: a dry run that only adds up the fixed partitions (ROMs are 0)."""
         self.c = c
         self.sfdisk = header
         self.parts: list = []    # in listing order (MBR extended partition included)
@@ -378,7 +392,7 @@ class Layout:
 
     def rom_size(self) -> int:
         """Size of the next ROM partition; the last one takes the remainder."""
-        return self.rom_sizes.pop(0)
+        return 0 if self.rom_sizes is None else self.rom_sizes.pop(0)
 
     def _add(self, sfd: str, part: Part, role: str, size: int):
         self.sfdisk += sfd + "\n"
@@ -398,7 +412,7 @@ class Layout:
         """MBR logical partition; size None fills the rest of the card."""
         self.pos += self.gap
         if size is None:
-            size = self.c.total - self.pos
+            size = 0 if self.rom_sizes is None else self.c.total - self.pos
             sfd, shown = f"start={self.pos}, type={typ}", "~" + hsize(size)
         else:
             sfd, shown = f"start={self.pos}, size={size}, type={typ}", hsize(size)
@@ -422,34 +436,22 @@ T_LINUX = "0FC63DAF-8483-4772-8E79-3D69D8477DE4"   # GPT Linux filesystem
 
 def make_layout(c: Choices) -> Layout:
     d = c.device
-    src = d.src
-    # Space left for ROM partitions is split equally between the selected OSes.
-    fixed, nlog = d.uboot_sectors[1], 0
-    if c.sel("amberelec"):                         # AmberELEC's FAT partition holds p1's boot file
-        fixed += AMB_BOOT_SIZE + AMB_STOR_SIZE
-    else:
-        fixed += BOOTSEL_SIZE
-    if c.sel("darkos"):
-        fixed += DRK_BOOT_SIZE + DRK_ROOT_SIZE
-        nlog += 3
-    if c.sel("arkos"):
-        fixed += src["arkos"][0].size + ARK_ROOT_SIZE
-        nlog += 3
-    if c.sel("mustardos"):
-        fixed += src["mustardos"][0].size + src["mustardos"][1].size
-        nlog += 3
-    if c.sel("knulli"):
-        fixed += src["knulli"][0].size
-        nlog += 2
-    if c.sel("rocknix"):
-        fixed += src["rocknix"][0].size + RNX_STOR_SIZE
-        nlog += 3
+    if d.layout not in LAYOUTS:
+        die(f"unknown layout '{d.layout}' in src/devices/{d.key}.json (choose from: {' '.join(LAYOUTS)})")
     if not d.gpt:
         gap, end = GAP, c.total
+        header, first = f"label: dos\nlabel-id: 0x{DISKID}\nunit: sectors\n\n", 5
     else:
         gap = 0                                    # GPT: no extended partition, no gaps
         end = (c.total - 34) // MIB * MIB          # keep the last 33 sectors for the backup GPT
-    free = end - fixed - nlog * gap
+        # A short entry array leaves sector 16 on for a boot0 the firmware rewrites (CubeXX).
+        length = f"table-length: {d.gpt_entries}\n" if d.gpt_entries else ""
+        header, first = f"label: gpt\nlabel-id: {c.partuuid(0)}\n{length}unit: sectors\n\n", 1
+    # Space left for ROM partitions is split equally between the selected OSes. The fixed
+    # partitions (and MBR gaps) are added up by a dry run of the layout with empty ROMs.
+    dry = Layout(c, header, first, gap, None)
+    LAYOUTS[d.layout](c, dry)
+    free = end - dry.pos
     nrom = len(c.user_os)
     rom = free // nrom // MIB * MIB
     last = (free - (nrom - 1) * rom) // MIB * MIB
@@ -457,13 +459,10 @@ def make_layout(c: Choices) -> Layout:
         die(f"card too small ({c.total} sectors)")
     rom_sizes = [rom] * (nrom - 1) + [last]
 
-    if d.gpt:
-        lay = Layout(c, f"label: gpt\nlabel-id: {c.partuuid(0)}\nunit: sectors\n\n", 1, gap, rom_sizes)
-    else:
-        lay = Layout(c, f"label: dos\nlabel-id: 0x{DISKID}\nunit: sectors\n\n", 5, gap, rom_sizes)
-    if d.layout not in LAYOUTS:
-        die(f"unknown layout '{d.layout}' in src/devices/{d.key}.json (choose from: {' '.join(LAYOUTS)})")
+    lay = Layout(c, header, first, gap, rom_sizes)
     LAYOUTS[d.layout](c, lay)
+    if d.gpt_entries and len(lay.numbered()) > d.gpt_entries:
+        die(f"{len(lay.numbered())} partitions, but the {d.name} GPT holds {d.gpt_entries}")
     if lay.pos > end:
         die(f"layout overflows the card ({lay.pos} > {end} sectors)")
     return lay
@@ -582,9 +581,45 @@ def layout_rgb30(c: Choices, lay: Layout):
         die("internal: knulli must be p1/p2")
 
 
+def aboot_name(c: Choices, os_key: str) -> str:
+    """CubeXX: GPT name of an OS's Android boot image partition. The default OS's is
+    "boot", the name the vendor U-Boot itself reads; the others are boot_<os>."""
+    return "boot" if os_key == c.default else f"boot_{os_key}"
+
+
+def layout_cubexx(c: Choices, lay: Layout):
+    """GPT, vendor U-Boot (env-h700). Both ramdisks hard-code their partitions: knulli's
+    mounts /dev/mmcblk0p3 (KNULLI) and takes p4 as SHARE, MustardOS's mounts
+    /dev/mmcblk0p5 (ROOTFS). U-Boot finds the rest by GPT name: "env" (shared), the
+    Android boot images (aboot_name) and "boot-resource" (bootlogo.bmp: the default OS's
+    FAT partition). MustardOS finds BOOT and ROMS through its storage num files. Its own
+    U-Boot dtb is in a raw partition: U-Boot can only read partitions by name here."""
+    src = c.device.src
+    if not (c.sel("knulli") and c.sel("mustardos")):
+        die("internal: the CubeXX layout needs knulli and MustardOS")
+    res = lambda os_key, name: "boot-resource" if c.default == os_key else name
+    lay.gpt(c.device.env_src[1], T_LINUX, "env", "U-Boot env: shared, boot_normal picks the OS", "ENV")
+    lay.gpt(src["mustardos"][0].size, T_DATA, res("mustardos", "mus-boot"),
+            "FAT BOOT: MustardOS bootlogo", "MUS_BOOT")
+    lay.gpt(src["knulli"][0].size, T_DATA, res("knulli", "knulli"),
+            "FAT KNULLI: knulli squashfs + bootlogo", "KNU_BOOT")
+    lay.gpt(lay.rom_size(), T_DATA, "SHARE", "exFAT SHARE: knulli /userdata (roms)", "KNU_SHARE", rom=True)
+    lay.gpt(src["mustardos"][1].size, T_LINUX, "rootfs", "ext4 ROOTFS: MustardOS root", "MUS_ROOT")
+    lay.gpt(src["knulli"][1].size, T_LINUX, aboot_name(c, "knulli"),
+            "Android boot image: knulli kernel + ramdisk", "KNU_ABOOT")
+    lay.gpt(src["mustardos"][2].size, T_LINUX, aboot_name(c, "mustardos"),
+            "Android boot image: MustardOS kernel + ramdisk", "MUS_ABOOT")
+    # MustardOS ROMS MUST be the last partition (its factory reset resizes it to 100%).
+    lay.gpt(MUS_DTB_SIZE, T_LINUX, "dtb_mustardos", "raw: MustardOS's U-Boot dtb", "MUS_DTB")
+    lay.gpt(lay.rom_size(), T_DATA, "roms", "exFAT ROMS: MustardOS roms (last)", "MUS_ROM", rom=True)
+    n = lay.n
+    if (n["KNU_BOOT"], n["KNU_SHARE"], n["MUS_ROOT"]) != (3, 4, 5):
+        die("internal: knulli must be p3/p4 and MustardOS ROOTFS p5")
+
+
 # The layout functions by name ("layout" in src/devices/<device>.json). The partition
 # order and the numbers each OS needs are code, not data: see the checks at their ends.
-LAYOUTS = {"g350": layout_g350, "rgb30": layout_rgb30}
+LAYOUTS = {"g350": layout_g350, "rgb30": layout_rgb30, "cubexx": layout_cubexx}
 
 
 # ============================================================================ 4. per-OS code
@@ -621,9 +656,12 @@ class OS:
         root = c.lay.n.get(f"{self.prefix}_ROOT")
         if root:
             v.update(ROOT=root, ROOT_PU=c.partuuid(root))
+        if f"{self.prefix}_ABOOT" in c.lay.n:
+            v.update(ABOOT=aboot_name(c, self.key))
         return v
 
     def copy(self, c: Choices):
+        """dd each Device.src partition to its role in copied (devices list fewer)."""
         image = c.device.images[self.key]
         for src, role in zip(c.device.src[self.key], self.copied):
             target = c.part(role)
@@ -657,7 +695,7 @@ class AmberELEC(OS):
     def fix_fs(self, c):
         log("AmberELEC STORAGE: fsck + grow to 8G + remove .please_resize_me")
         grow_storage(c.part("AMB_STOR"))
-        if c.bootmode != "ini":
+        if c.scr:
             with mounted(c, c.part("AMB_STOR"), "ext4", "ambstor") as stor:   # /storage
                 install_next(c, "amberelec", stor)
 
@@ -706,7 +744,7 @@ class DarkOS(OS):
                 write(f"{boot}{self.boot_ini}", render(c, self.key))
             print("--- dArkOS /etc/fstab:")
             print(read(f"{root}/etc/fstab"), end="")
-            if c.bootmode != "ini":
+            if c.scr:
                 install_next(c, "darkos", root)
 
     def verify(self, c):
@@ -815,7 +853,7 @@ class ArkOS(OS):
                 write(f"{boot}{self.boot_ini}", render(c, self.key))
             print("--- ArkOS /etc/fstab:")
             print(read(f"{root}/etc/fstab"), end="")
-            if c.bootmode != "ini":
+            if c.scr:
                 install_next(c, "arkos", root)
 
     def verify(self, c):
@@ -830,7 +868,7 @@ class MustardOS(OS):
     """Finds its partitions through /opt/muos/device/config/storage/*/num on its rootfs.
     Its ROMS must be the last partition (its factory reset resizes it to 100%)."""
     key, name, prefix = "mustardos", "MustardOS", "MUS"
-    copied = ("MUS_BOOT", "MUS_ROOT")
+    copied = ("MUS_BOOT", "MUS_ROOT", "MUS_ABOOT")    # ABOOT: CubeXX Android boot image
     roms = ("MUS_ROM", "ROMS", "MustardOS roms")      # MustardOS reformats it on first boot
     tools = ("e2fsck",)
     boot_ini = "/boot.ini"
@@ -843,6 +881,13 @@ class MustardOS(OS):
 
     def prepare(self, c):
         n = c.lay.n
+        pkg = c.device.opt("mustardos", "uboot_dtb")
+        if pkg:
+            log(f"MustardOS: its U-Boot dtb (its input device name) -> {c.part('MUS_DTB')}")
+            with open(c.part("MUS_DTB"), "r+b") as f:
+                f.write(package_item(c.device.images["mustardos"], pkg, "dtb"))
+                f.flush()
+                os.fsync(f.fileno())
         log(f"MustardOS: point storage config at p{n['MUS_BOOT']}/p{n['MUS_ROOT']}/p{n['MUS_ROM']}, "
             "neutralise partition-table edits")
         with mounted(c, c.part("MUS_ROOT"), "ext4", "muroot") as root, \
@@ -877,7 +922,7 @@ class MustardOS(OS):
             if self.key in c.device.os_boot_ini:           # reference only; U-Boot reads p1
                 shutil.copyfile(f"{boot}{self.boot_ini}", f"{boot}{self.boot_ini}.orig")
                 write(f"{boot}{self.boot_ini}", render(c, self.key))
-            if c.bootmode != "ini":
+            if c.scr:
                 install_next(c, "mustardos", root)
 
     def verify(self, c):
@@ -896,7 +941,7 @@ class Knulli(OS):
     """knulli-part takes /userdata as boot partition + 1 (one digit): p1/p2 on the RGB30,
     p5/p6 on the G350. The G350 image has a vendor 4.4 kernel (uImage, bootm)."""
     key, name, prefix = "knulli", "knulli", "KNU"
-    copied = ("KNU_BOOT",)
+    copied = ("KNU_BOOT", "KNU_ABOOT")                # ABOOT: CubeXX Android boot image
     roms = ("KNU_SHARE", "SHARE", "knulli /userdata")   # what knulli's autoresize would leave
     # G350: vibrates from ~3 s after power-on until knulli's logo (its S01pwm stops the
     # rumble motor). Tried from boot.ini, all on a G350: "gpio set 15" (no change), PWM0
@@ -911,9 +956,9 @@ class Knulli(OS):
         with mounted(c, c.part("KNU_BOOT"), "vfat", "knboot") as boot:
             conf = f"{boot}/knulli-boot.conf"
             need_file(conf)
-            initrd = c.device.opt("knulli", "initrd")
-            for f in ("boot/linux", initrd, c.device.dtb["knulli"]):
-                need_file(f"{boot}/{f}")
+            for f in [*c.device.opt("knulli", "boot_files", ()), c.device.dtb.get("knulli")]:
+                if f:
+                    need_file(f"{boot}/{f}")
             shutil.copyfile(conf, f"{conf}.orig")
             text = re.sub(r"(?m)^[ \t\v\f\r]*autoresize[ \t\v\f\r]*=.*$", "autoresize=false", read(conf))
             write(conf, text)
@@ -922,7 +967,8 @@ class Knulli(OS):
             if re.search(r"(?m)^ *format-internal *=", text):
                 die("format-internal is set in knulli-boot.conf")
             print("\n".join(grep_n(conf, "autoresize")))
-        if c.bootmode != "ini":
+            rm_f(f"{boot}/boot/autoresize")              # first-boot flag (CubeXX image)
+        if c.scr:
             with mounted(c, c.part("KNU_SHARE"), "exfat", "knshare") as share:   # /userdata
                 install_next(c, "knulli", share)
 
@@ -1145,7 +1191,8 @@ def boot_ini_g350(c: Choices) -> str:
 def keys_block(c: Choices) -> str:
     """boot.scr: read the keys into ${key} (src/boot/keys.<bootmode>.cmd).
     scr-g350: ROCKNIX's mainline U-Boot reads the GPIO register with setexpr.
-    scr-rgb30: knulli's U-Boot (no gpio, no setexpr) compares register bytes copied to RAM."""
+    scr-rgb30: knulli's U-Boot (no gpio, no setexpr) compares register bytes copied to RAM.
+    env-h700: the vendor U-Boot sets up and reads the PE pins with setexpr (${mb_key})."""
     path = f"{BOOT_DIR}/keys.{c.bootmode}.cmd"
     if not os.path.isfile(path):
         die(f"missing {path}")
@@ -1190,9 +1237,54 @@ def boot_cmd_rgb30(c: Choices) -> str:
     return "\n".join(lines) + "\n" + keys_block(c) + next_block(c) + boot_branches(c)
 
 
+# CubeXX, Allwinner vendor U-Boot 2018.05 (env-h700): no boot script. Its bootcmd always
+# ends in "run setargs_mmc boot_normal" (it rewrites bootcmd itself), so the choice is a
+# new boot_normal, plus mb_* variables, added to the uboot_os image's env and written to
+# the card's shared "env" partition (env_set_vars). It has the simple command parser
+# (no hush: "if" etc. are unknown commands, tested), so a command can't branch: the key
+# bits pick the name of the variable to run.
+def env_line(text: str) -> str:
+    """A src/boot/*.cmd template as one env value: comment lines dropped, ";"-joined."""
+    lines = [ln.strip() for ln in text.splitlines()]
+    return "; ".join(ln for ln in lines if ln and not ln.startswith("#"))
+
+
+def boot_env_h700(c: Choices) -> str:
+    keys = keys_block(c)
+    lines = [
+        f"# ---- {c.device.name} multi-boot: {boot_title(c)} ----",
+        f"# Generated by flash-dualboot.py --device {c.device.key} --os {','.join(c.user_os)} --default {c.default}",
+        f"# U-Boot env variables added to {os.path.basename(c.uboot_img)}'s env (one per line,",
+        "# name=value) and written to the shared env partition. Keys, from src/boot/keys.env-h700.cmd:",
+        *[f"#   {ln.lstrip('# ')}" for ln in keys.splitlines() if ln.startswith("#")],
+        "#",
+        *layout_comment(c),
+        f"mb_keys={env_line(keys)}",
+    ]
+    for os_key in c.user_os:
+        lines.append(f"mb_{os_key}={env_line(OS_BY_KEY[os_key].branch(c))}")
+    # No hush, so no "if": the key bits (1 = released) name the variable to run,
+    # mb_sel<Vol+><Vol->. Vol+ wins when both are held. If that fails (no such variable,
+    # or the boot fails), boot_normal goes on to the default OS.
+    vol = dict(zip(KEY_VARS, c.key_os))               # volminus / volplus -> OS
+    sel = {"11": c.default, "10": vol.get("volminus", c.default), "01": vol.get("volplus", c.default),
+           "00": vol.get("volplus", vol.get("volminus", c.default))}
+    for bits, os_key in sel.items():
+        lines.append(f"mb_sel{bits}=run mb_{os_key}")
+    lines.append(f"boot_normal=run mb_keys; run mb_sel${{mb_up}}${{mb_dn}}; run mb_{c.default}")
+    return "\n".join(lines)
+
+
+def env_vars(boot_cfg: str) -> list:
+    """boot_env_h700 text -> [(name, value)]."""
+    return [tuple(ln.split("=", 1)) for ln in boot_cfg.splitlines() if ln and not ln.startswith("#")]
+
+
 def boot_config(c: Choices) -> str:
-    """The shared boot.ini (ini) or boot.cmd (scr-*) for p1, ending in one newline."""
-    gen = {"ini": boot_ini_g350, "scr-g350": boot_cmd_g350, "scr-rgb30": boot_cmd_rgb30}[c.bootmode]
+    """The shared boot.ini (ini), boot.cmd (scr-*) or env variables (env-*), ending in
+    one newline."""
+    gen = {"ini": boot_ini_g350, "scr-g350": boot_cmd_g350, "scr-rgb30": boot_cmd_rgb30,
+           "env-h700": boot_env_h700}[c.bootmode]
     return gen(c).rstrip("\n") + "\n"
 
 
@@ -1225,7 +1317,7 @@ def show_plan(c: Choices):
     print(f"Keys:     no key = {osname(c.default)}")
     for i, os_key in enumerate(c.key_os):
         print(f"          {KEY_NAMES[i]} (pin {c.device.key_pins[i]}) = {osname(os_key)}")
-    if c.bootmode != "ini":
+    if c.scr:
         print(f"Next:     multiboot-next OS boots OS once ({NEXT_FILE} on p{c.n('BOOTSEL')}; a held key wins)")
         for os_key in c.user_os:
             print(f"          {osname(os_key)}: {next_path(os_key)}")
@@ -1244,10 +1336,11 @@ def print_plan(c: Choices, boot_cfg: str):
     print(c.lay.sfdisk, end="")
     if c.bootmode == "ini":
         print("\n---- boot.ini (p1)")
-        print(boot_cfg, end="")
-    else:
+    elif c.scr:
         print("\n---- boot.cmd (p1, compiled to boot.scr)")
-        print(boot_cfg, end="")
+    else:
+        print(f"\n---- U-Boot env additions (p{c.n('ENV')} \"env\")")
+    print(boot_cfg, end="")
     if c.bootmode == "scr-g350":
         print(f"\n---- ROCKNIX /extlinux/extlinux.conf.dualboot (p{c.n('RNX_BOOT')})")
         print(OS_BY_KEY["rocknix"].extlinux(c), end="")
@@ -1256,7 +1349,7 @@ def print_plan(c: Choices, boot_cfg: str):
             o = OS_BY_KEY[os_key]
             print(f"\n---- {o.name} {o.boot_ini} (p{c.n(o.prefix + '_BOOT')})")
             print(render(c, os_key), end="")
-    if c.bootmode != "ini":
+    if c.scr:
         print("\n---- multiboot-next (installed on each OS)")
         print(next_helper(c), end="")
 
@@ -1370,13 +1463,13 @@ def preflight(c: Choices):
     for o in c.device.os_boot_ini:
         if c.sel(o) and not os.path.isfile(f"{HERE}/boot.ini.{o}"):
             die(f"missing {HERE}/boot.ini.{o}")
-    if c.bootmode != "ini" and not os.path.isfile(f"{HERE}/multiboot-next"):
+    if c.scr and not os.path.isfile(f"{HERE}/multiboot-next"):
         die(f"missing {HERE}/multiboot-next")
 
     tools = ["sfdisk", "wipefs", "mkfs.exfat", "blkid", "partprobe"]
-    if not c.sel("amberelec"):
-        tools += ["mkfs.vfat"]                     # BOOTSEL
-    if c.bootmode != "ini":
+    if not c.sel("amberelec") and not c.bootmode.startswith("env-"):
+        tools += ["mkfs.vfat"]                     # BOOTSEL (env-*: none)
+    if c.scr:
         tools += ["mkimage"]                       # boot.cmd -> boot.scr
     for o in c.oses:
         tools += o.tools
@@ -1448,11 +1541,12 @@ def flash(c: Choices, boot_cfg: str):
     # Stale data from an earlier layout can look like a filesystem to libblkid, and
     # mkfs.exfat (exfatprogs >= 1.4) refuses with "Device has existing signatures".
     unmount_dev(dev)
+    bootsel = "BOOTSEL" in lay.n and not c.sel("amberelec")    # a FAT32 BOOTSEL to create
     to_wipe = [c.path(p.num) for p in lay.parts if p.rom]
-    if not c.sel("amberelec"):
+    if bootsel:
         to_wipe.append(c.part("BOOTSEL"))
     run(["wipefs", "-a", *to_wipe], stdout=subprocess.DEVNULL)
-    if not c.sel("amberelec"):
+    if bootsel:
         log(f"Creating FAT32 BOOTSEL on {c.part('BOOTSEL')}")
         run(["mkfs.vfat", "-F", "32", "-n", "BOOTSEL", c.part("BOOTSEL")])
     for o in c.oses:
@@ -1470,7 +1564,7 @@ def flash(c: Choices, boot_cfg: str):
     log("Verification")
     run(["sfdisk", "-d", dev])
     run(["blkid", *[c.path(n) for n in lay.numbered()]])
-    if not c.sel("amberelec"):
+    if bootsel:
         check_label(c, "BOOTSEL", "BOOTSEL")
     for o in c.oses:
         o.verify(c)
@@ -1495,7 +1589,73 @@ def copy_from_darkos_boot(c: Choices, name: str, dst_dir: str):
         shutil.copyfile(f"{drk}/{name}", f"{dst_dir}/{name}")
 
 
+def package_item(image: str, sector: int, name: str) -> bytes:
+    """An item (u-boot, monitor, dtbo, dtb) of the Allwinner boot package at sector of
+    image: "sunxi-package" header, item count at 0x20, items of 0x170 bytes from 0x3c
+    ("IIE;"/"MIE;", name at +4, data offset and length at +0x44/+0x48)."""
+    with open(image, "rb") as f:
+        f.seek(sector * S)
+        head = f.read(0x3c + 16 * 0x170)
+        if not head.startswith(b"sunxi-package"):
+            die(f"no Allwinner boot package at sector {sector} of {image}")
+        for i in range(int.from_bytes(head[0x20:0x24], "little")):
+            item = head[0x3c + i * 0x170:0x3c + (i + 1) * 0x170]
+            if item[4:68].split(b"\0")[0] == name.encode():
+                off, length = int.from_bytes(item[0x44:0x48], "little"), int.from_bytes(item[0x48:0x4c], "little")
+                f.seek(sector * S + off)
+                data = f.read(length)
+                if name.startswith("dtb") and not data.startswith(bytes.fromhex("d00dfeed")):
+                    die(f"boot package item {name} in {image} is not a dtb")
+                return data
+    die(f"no {name} in the boot package of {image}")
+
+
+def env_parse(blob: bytes, where: str) -> list:
+    """U-Boot env (CRC32 + NUL-separated name=value, no redundant copy) -> [(name, value)]."""
+    if int.from_bytes(blob[:4], "little") != zlib.crc32(blob[4:]):
+        die(f"bad U-Boot env CRC in {where}")
+    data = blob[4:].split(b"\0\0")[0]
+    # knulli's env starts with an empty entry (a NUL); U-Boot skips it, so does this.
+    return [tuple(e.decode().split("=", 1)) for e in data.split(b"\0") if e]
+
+
+def env_build(pairs: list, size: int) -> bytes:
+    data = b"".join(f"{k}={v}".encode() + b"\0" for k, v in pairs) + b"\0"
+    if len(data) > size - 4:
+        die("U-Boot env too big")
+    data = data.ljust(size - 4, b"\0")
+    return zlib.crc32(data).to_bytes(4, "little") + data
+
+
+def env_read(path: str, offset: int, size: int) -> list:
+    with open(path, "rb") as f:
+        f.seek(offset)
+        return env_parse(f.read(size), path)
+
+
+def env_set_vars(c: Choices, boot_cfg: str):
+    """env-*: the uboot_os image's env plus boot_cfg's variables -> the card's env partition."""
+    start, size = c.device.env_src[0] * S, c.device.env_size
+    pairs = dict(env_read(c.uboot_img, start, size))
+    pairs.update(env_vars(boot_cfg))
+    log(f"Writing the U-Boot env ({os.path.basename(c.uboot_img)}'s + multi-boot) to {c.part('ENV')}")
+    with open(c.part("ENV"), "r+b") as f:
+        f.write(env_build(list(pairs.items()), size))
+        f.flush()
+        os.fsync(f.fileno())
+    got = dict(env_read(c.part("ENV"), 0, size))
+    if got.get("boot_normal") != dict(env_vars(boot_cfg))["boot_normal"]:
+        die("boot_normal not found in the written env")
+    print(f"--- env: {len(got)} variables, boot_normal={got['boot_normal']}")
+
+
 def install_boot_config(c: Choices, boot_cfg: str):
+    if c.bootmode.startswith("env-"):
+        write(f"{HERE}/boot.env.generated", boot_cfg)  # a copy for the user (gitignored)
+        if os.environ.get("SUDO_USER"):
+            run(["chown", f"{os.environ['SUDO_USER']}:", f"{HERE}/boot.env.generated"], check=False)
+        env_set_vars(c, boot_cfg)
+        return
     ini = c.bootmode == "ini"
     name = "boot.ini" if ini else "boot.cmd"
     log(f"Installing multi-boot {'boot.ini' if ini else 'boot.scr'} on {c.part('BOOTSEL')}")

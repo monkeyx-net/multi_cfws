@@ -51,7 +51,7 @@
   "_os_opts": "per-OS settings for this device's images",
   "os_opts": {
     "arkos": {"dtb_from_darkos": true},
-    "knulli": {"initrd": "boot/uInitrd"}
+    "knulli": {"boot_files": ["boot/linux", "boot/uInitrd"]}
   },
   "_os_boot_ini": "OSes whose own BOOT partition gets src/boot.ini.<os> (reference only; U-Boot reads p1)",
   "os_boot_ini": ["darkos", "arkos", "mustardos"],

@@ -1,0 +1,47 @@
+{
+  "_doc": "RG CubeXX (Allwinner H700). UNTESTED on a device. Allwinner vendor U-Boot 2018.05: it reads partitions by GPT name (env, boot, boot-resource) and its bootcmd always ends in 'run setargs_mmc boot_normal', so the multi-boot choice is a new boot_normal in the shared env partition. It has the simple command parser (no hush: no if/then/else). Image names, src offsets/sizes (sfdisk -d <image>) and the boot package sector are tied to specific image releases.",
+  "name": "CubeXX",
+  "soc": "H700",
+  "all_os": ["knulli", "mustardos"],
+  "_key_pins": "Vol-, Vol+ (PE2, PE1: bank E = 4 * 32); shown in --plan only, the env reads the PE data register",
+  "key_pins": [130, 129],
+  "table": "gpt",
+  "layout": "cubexx",
+  "_uboot_sectors": "knulli's raw area: boot0 at sector 512 (the boot ROM's 256K fallback), boot package at 32800; sectors 2-15 hold the GPT entries (gpt_entries), 16+ get boot0",
+  "uboot_sectors": [512, 73728],
+  "_gpt_entries": "after DRAM training the firmware writes boot0 to sector 16 (seen on a CubeXX card: it destroyed a standard GPT's entry array, sectors 2-33, and nothing booted). MustardOS's image uses 8 entries (sectors 2-3); 16 = sectors 2-5 (at most 56 end before sector 16)",
+  "gpt_entries": 16,
+  "_boot": "env-h700: the vendor U-Boot from the knulli image, with boot_normal etc. added to knulli's env (copied from env_src)",
+  "boot": [
+    {"bootmode": "env-h700", "uboot_os": "knulli"}
+  ],
+  "_env": "U-Boot env inside the uboot_os image: [start, size] of its 'env' partition; the env itself is the first env_size bytes (CRC32 + data)",
+  "env_src": [114688, 32768],
+  "env_size": 131072,
+  "images": {
+    "knulli": "knulli-h700-rg-cubexx-scarab-20260511.img",
+    "mustardos": "MustardOS_RGCUBEXX-H_2606.0_ANDROMEDA-db2a3bd0.img"
+  },
+  "_src": "partitions copied from each image, in order: [start, size, what] in sectors",
+  "src": {
+    "knulli": [[147456, 10485760, "image p3: FAT KNULLI 5G (boot-resource); its ext4 SHARE is replaced"],
+               [73728, 40960, "image p1: Android boot image 20M (stock 4.9.170 kernel + ramdisk)"]],
+    "mustardos": [[90112, 65536, "image p2: FAT BOOT 32M (boot-resource, bootlogo.bmp)"],
+                  [319488, 16777216, "image p5: ext4 rootfs 8G"],
+                  [188416, 131072, "image p4: Android boot image 64M (same kernel as knulli's)"]]
+  },
+  "_dtb": "none loaded from files. MustardOS's own U-Boot dtb goes raw into partition dtb_mustardos (os_opts uboot_dtb): its input setup needs the input device name muOS-Input-Source, which knulli's dtb calls 'Anbernic RG CubeXX Controller'. fatload/fatwrite mmc 0:N don't work on this U-Boot (tested), sunxi_flash read by name does",
+  "dtb": {},
+  "uuids": {},
+  "_os_opts": "knulli boot_files: checked on KNULLI (kernel and ramdisk are in its Android boot image). mustardos uboot_dtb: sector of the boot package in its image",
+  "os_opts": {
+    "knulli": {"boot_files": ["boot/knulli"]},
+    "mustardos": {"uboot_dtb": 32800}
+  },
+  "os_boot_ini": [],
+  "unique_labels": ["KNULLI", "SHARE"],
+  "numbers": [
+    ["ENV", "MUS_BOOT", "KNU_BOOT", "KNU_SHARE", "MUS_ROOT", "KNU_ABOOT", "MUS_ABOOT", "MUS_DTB", "MUS_ROM"]
+  ],
+  "untested": {"env-h700": ["knulli", "mustardos"]}
+}
