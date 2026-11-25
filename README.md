@@ -7,7 +7,7 @@ for one device (3 at most: no key, Vol- and Vol+):
 |---|---|---|
 | **G350** (`--device g350`, the default) | `amberelec arkos darkos knulli mustardos rocknix` | **dArkOS G350**, even without `darkos` in `--os`. With `rocknix`: **ROCKNIX** instead |
 | **RGB30** (`--device rgb30`, see [RGB30](#rgb30)) | `arkos darkos knulli rocknix` | **knulli**, even without `knulli` in `--os` |
-| **RG CubeXX** (`--device cubexx`, **untested**, see [RG CubeXX](#rg-cubexx-h700-untested)) | `knulli mustardos` | **knulli** |
+| **RG CubeXX** (`--device cubexx`, tested with default MustardOS, see [RG CubeXX](#rg-cubexx-h700)) | `knulli mustardos` | **knulli** |
 
 The card's U-Boot is copied from that image. It must be in `img/` even if you don't
 install that OS. The script stops before touching the card if it is missing, and
@@ -363,9 +363,9 @@ What each OS needs, and what the script does about it:
 - knulli and ROCKNIX updates only touch files on their own boot partitions.
   ROCKNIX's update copies DTBs but does not rewrite U-Boot.
 
-## RG CubeXX (H700, untested)
+## RG CubeXX (H700)
 
-**Not tested on a CubeXX yet.** `--device cubexx` builds a knulli + MustardOS card;
+`--device cubexx` builds a knulli + MustardOS card;
 ROCKNIX is not supported (see [below](#rocknix-and-the-cubexx)). Images (in `img/`):
 
 - `knulli-h700-rg-cubexx-scarab-20260511.img` (always needed: the U-Boot comes from it)
@@ -388,7 +388,9 @@ boot script: that U-Boot finds partitions by **GPT name** and always runs
 - knulli's boot0 and boot package (sectors 512–73727, as in its image). The GPT has only
   16 entries (sectors 2–5; MustardOS's image has 8): after DRAM training the firmware
   writes boot0 to sector 16, which overwrote a normal GPT's entries (sectors 2–33) on the
-  first test card, and then nothing booted;
+  first test card, and then nothing booted. Sectors 6–511 are zeroed: the boot ROM tries
+  sector 16 before 512, and a loader left there by an earlier image (ROCKNIX's, on a
+  test card) ran instead, with a black screen;
 - one shared `env` partition: knulli's env plus a new `boot_normal` that reads the
   volume keys (sets up pins PE1/PE2 as pulled-up inputs and reads the PE data register
   with `setexpr`) and loads the chosen OS's Android boot image with
@@ -402,21 +404,18 @@ boot script: that U-Boot finds partitions by **GPT name** and always runs
 - `boot-resource` (where U-Boot finds `bootlogo.bmp`) is the default OS's FAT partition,
   so the boot logo is the default OS's.
 
-MustardOS needs its own U-Boot device tree: its input setup looks for the input
-device name `muOS-Input-Source`, which knulli's device tree calls `Anbernic RG CubeXX
-Controller`. The script copies the dtb from MustardOS's boot package to a small raw
-partition, `dtb_mustardos`, and MustardOS's branch loads it with `sunxi_flash read` +
-`fdt addr` before `bootm` (`fatload`/`fatwrite mmc 0:N` don't work on this U-Boot).
+Both OSes boot with knulli's U-Boot device tree: this U-Boot's `bootm` always passes
+its own (a dtb loaded with `fdt addr` is ignored). MustardOS's input daemon (`muinput`)
+looks for the input device name `muOS-Input-Source`, which knulli's device tree calls
+`Anbernic RG CubeXX Controller`, so MustardOS's branch renames it first with
+`fdt set /soc@03000000/gpio_keys label muOS-Input-Source` (and sets its 1 ms polling).
 
-Run `--plan` to see the layout and the env variables. What needs a CubeXX to confirm:
+Run `--plan` to see the layout and the env variables.
 
-Tested so far: the env is read, the 16-entry GPT survives, and knulli boots from
-`boot_knulli` (with a test env). Still to confirm:
-
-1. MustardOS boots from this card.
-2. Holding Vol- boots the other OS (the key reading).
-3. MustardOS's controls work when booted from this card (the dtb swap). If they don't,
-   `bootm` ignores `fdt addr` on this U-Boot.
+Tested on a CubeXX (DDR3) with default MustardOS: the 16-entry GPT survives, the env
+is read, no key boots MustardOS (with working controls) and Vol- boots knulli. Not yet
+tried: default knulli (Vol- then boots MustardOS), and a card built in one go with this
+version (the test card had its env and sectors 6–511 fixed by hand).
 
 If nothing boots, the card can be checked on a PC: the env is in p1 and is readable
 with `fw_printenv` (from `uboot-tools`, with a config line `/dev/sdX1 0x0 0x20000`).
@@ -491,7 +490,7 @@ python3 src/flash-dualboot.py --plan --device rgb30 --os knulli,rocknix
 sudo IMGDIR=/path/to/images python3 src/flash-dualboot.py --os darkos,mustardos /dev/sdb
 ```
 
-- `--device`: `g350` (default), `rgb30` or `cubexx` (untested).
+- `--device`: `g350` (default), `rgb30` or `cubexx`.
 - `--os` (required): comma list naming 2 or 3 OSes of that device. There is no
   default: G350 `amberelec arkos darkos knulli mustardos rocknix`, RGB30
   `arkos darkos knulli rocknix`, CubeXX `knulli mustardos`.

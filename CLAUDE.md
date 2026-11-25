@@ -4,7 +4,7 @@ Builds a multi-boot SD card with 2 or 3 OSes for one device (`--device`). `--os`
 required and must name them; there is no "all" default:
 the G350 (RK3326; dArkOS, AmberELEC, ArkOS, knulli, MustardOS, ROCKNIX; the default), the
 RGB30 (RK3566; dArkOS, ArkOS, knulli, ROCKNIX) or the RG CubeXX (H700; knulli, MustardOS;
-untested on a device). Everything lives in `src/`: `flash-dualboot.py` (Python 3.8+,
+tested with default MustardOS). Everything lives in `src/`: `flash-dualboot.py` (Python 3.8+,
 standard library only), one JSON file per device (`devices/`), the boot command templates
 (`boot/`), its three G350 boot.ini templates and the `multiboot-next` template.
 `README.md` is the user-facing documentation; keep it in sync when the layout, CLI or key
@@ -49,7 +49,7 @@ For the G350 with ROCKNIX, also run the 6 combinations of 2–3 OSes that includ
 
 For the CubeXX, run `--device cubexx --os knulli,mustardos` with each default (the
 same sfdisk check). Without root, the env code can be checked against the images
-(`env_read`/`env_build`/`package_item`); `fw_printenv -l /tmp -c <config>` reads a
+(`env_read`/`env_build`); `fw_printenv -l /tmp -c <config>` reads a
 built env (config line `<file> 0x0 0x20000`).
 
 For the RGB30, do the same with `--device rgb30` for `darkos,knulli,rocknix`,
@@ -172,14 +172,16 @@ the GPT layout below then replaced that).
 - Partition roles: `KNU_BOOT KNU_SHARE RNX_BOOT RNX_STOR RNX_ROMS BOOTSEL` plus the
   shared `DRK_*` and `ARK_*`.
 
-## Constraints that are easy to break (CubeXX, untested)
+## Constraints that are easy to break (CubeXX)
 
 - **Vendor U-Boot (`env-h700`), from the knulli image** (sectors 512–73727: boot0 at 512,
   the boot package at 32800). After DRAM training the firmware writes boot0 to sector 16,
   which destroyed a standard GPT's entry array (sectors 2–33; nothing booted), so the GPT
   has 16 entries (`gpt_entries`, sfdisk `table-length: 16`, sectors 2–5; at most 56 end
-  before sector 16; MustardOS's image has 8). Tested: the GPT survives, the env is read,
-  knulli boots from `boot_knulli`. It finds partitions
+  before sector 16; MustardOS's image has 8). The boot ROM tries sector 16 before 512, so
+  `flash` zeroes from the end of the table (`table_end`) to U-Boot: a stale ROCKNIX SPL
+  there gave a black screen (tested). Tested with default MustardOS: the GPT survives, the
+  env is read, both OSes boot (`boot_knulli`, `boot`). It finds partitions
   by **GPT name** and replaces `bootcmd` with `run setargs_mmc boot_normal` itself, so the
   multi-boot is a new `boot_normal` (+ `mb_keys`, `mb_<os>`) in the shared `env`
   partition: the uboot_os image's env (`env_src`, `env_size` = 0x20000, CRC32, no
@@ -190,7 +192,7 @@ the GPT layout below then replaced that).
   skipped; a failing command doesn't stop the `;` list). No conditionals: `mb_keys` leaves
   `mb_up`/`mb_dn` (1 = released) and `boot_normal` runs `mb_sel${mb_up}${mb_dn}`, then
   the default OS as a fallback. Keys: PE1 = Vol+, PE2 = Vol-, active low; `keys.env-h700.cmd`
-  sets PE_CFG0/PE_PULL0 with `setexpr` arithmetic (`/ * + %` only). Not yet confirmed.
+  sets PE_CFG0/PE_PULL0 with `setexpr` arithmetic (`/ * + %` only). Tested: no key and Vol- both pick the right OS.
 - **`fatload`/`fatwrite mmc 0:N` don't work** (tested: no file written); `sunxi_flash
   read <addr> <partname>` does. Data U-Boot must read goes in a raw, named partition.
 - **Partitions the ramdisks hard-code**: knulli `/dev/mmcblk0p3` (KNULLI) with SHARE =
@@ -198,10 +200,12 @@ the GPT layout below then replaced that).
 - **Android boot images** (`KNU_ABOOT`, `MUS_ABOOT`, the extra entries in each OS's
   `copied`): the default OS's is named `boot`, the other `boot_<os>` (`aboot_name`).
   The default OS's FAT partition is named `boot-resource` (U-Boot's `bootlogo.bmp`).
-- **MustardOS needs its own U-Boot dtb** (input device `muOS-Input-Source`; knulli's
-  dtb names it differently): `package_item` copies it from its image's boot package
-  (`os_opts.mustardos.uboot_dtb`) to the raw partition `dtb_mustardos` (`MUS_DTB`); its
-  branch reads it with `sunxi_flash read` and points `fdt addr` at it (untested).
+- **Both OSes use knulli's U-Boot dtb.** `bootm` always passes U-Boot's control dtb
+  (`fdt addr` to another dtb is ignored, tested; `fdt addr -c` would skip the startup
+  fixups). MustardOS's `muinput` needs the input device name `muOS-Input-Source`, so its
+  branch renames `/soc@03000000/gpio_keys` with `fdt set` (no `fdt addr`, no resize;
+  tested: controls work). Fallback if that ever fails: `MUOS_INPUT_SOURCE_NAME` on
+  muinput's line in MustardOS's `module.sh`.
 - ROCKNIX: its H700 image has a mainline U-Boot (DDR3/DDR4 builds) that can't start
   Android boot images; not supported on this card.
 

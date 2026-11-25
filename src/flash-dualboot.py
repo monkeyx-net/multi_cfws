@@ -46,7 +46,6 @@ AMB_BOOT_SIZE = 2 * GIB          # partition sizes on the card (AmberELEC's are 
 AMB_STOR_SIZE = 8 * GIB
 RNX_STOR_SIZE = 8 * GIB
 BOOTSEL_SIZE = 64 * MIB
-MUS_DTB_SIZE = 1 * MIB           # CubeXX: MustardOS's U-Boot dtb (raw)
 DRK_BOOT_SIZE = 100 * MIB
 DRK_ROOT_SIZE = 12 * GIB
 ARK_ROOT_SIZE = 12 * GIB         # ArkOS's own first boot grows its ext4 to ~11GB
@@ -434,6 +433,13 @@ T_DATA = "EBD0A0A2-B9E5-4433-87C0-68B6B72699C7"    # GPT "Microsoft basic data" 
 T_LINUX = "0FC63DAF-8483-4772-8E79-3D69D8477DE4"   # GPT Linux filesystem
 
 
+def table_end(d: Device) -> int:
+    """First sector after the partition table (MBR: sector 0; GPT: header + entry array)."""
+    if d.table != "gpt":
+        return 1
+    return 2 + (((d.gpt_entries or 128) * 128) + S - 1) // S
+
+
 def make_layout(c: Choices) -> Layout:
     d = c.device
     if d.layout not in LAYOUTS:
@@ -592,8 +598,7 @@ def layout_cubexx(c: Choices, lay: Layout):
     mounts /dev/mmcblk0p3 (KNULLI) and takes p4 as SHARE, MustardOS's mounts
     /dev/mmcblk0p5 (ROOTFS). U-Boot finds the rest by GPT name: "env" (shared), the
     Android boot images (aboot_name) and "boot-resource" (bootlogo.bmp: the default OS's
-    FAT partition). MustardOS finds BOOT and ROMS through its storage num files. Its own
-    U-Boot dtb is in a raw partition: U-Boot can only read partitions by name here."""
+    FAT partition). MustardOS finds BOOT and ROMS through its storage num files."""
     src = c.device.src
     if not (c.sel("knulli") and c.sel("mustardos")):
         die("internal: the CubeXX layout needs knulli and MustardOS")
@@ -610,7 +615,6 @@ def layout_cubexx(c: Choices, lay: Layout):
     lay.gpt(src["mustardos"][2].size, T_LINUX, aboot_name(c, "mustardos"),
             "Android boot image: MustardOS kernel + ramdisk", "MUS_ABOOT")
     # MustardOS ROMS MUST be the last partition (its factory reset resizes it to 100%).
-    lay.gpt(MUS_DTB_SIZE, T_LINUX, "dtb_mustardos", "raw: MustardOS's U-Boot dtb", "MUS_DTB")
     lay.gpt(lay.rom_size(), T_DATA, "roms", "exFAT ROMS: MustardOS roms (last)", "MUS_ROM", rom=True)
     n = lay.n
     if (n["KNU_BOOT"], n["KNU_SHARE"], n["MUS_ROOT"]) != (3, 4, 5):
@@ -881,13 +885,6 @@ class MustardOS(OS):
 
     def prepare(self, c):
         n = c.lay.n
-        pkg = c.device.opt("mustardos", "uboot_dtb")
-        if pkg:
-            log(f"MustardOS: its U-Boot dtb (its input device name) -> {c.part('MUS_DTB')}")
-            with open(c.part("MUS_DTB"), "r+b") as f:
-                f.write(package_item(c.device.images["mustardos"], pkg, "dtb"))
-                f.flush()
-                os.fsync(f.fileno())
         log(f"MustardOS: point storage config at p{n['MUS_BOOT']}/p{n['MUS_ROOT']}/p{n['MUS_ROM']}, "
             "neutralise partition-table edits")
         with mounted(c, c.part("MUS_ROOT"), "ext4", "muroot") as root, \
@@ -1528,6 +1525,13 @@ def flash(c: Choices, boot_cfg: str):
 
     # 2. U-Boot
     first, end = c.device.uboot_sectors
+    # Clear the gap between the partition table and U-Boot: a boot loader left there by an
+    # earlier image can run instead of ours (the H700 boot ROM tries sector 16 before 512).
+    gap = table_end(c.device)
+    if gap < first:
+        log(f"Clearing sectors {gap}-{first - 1}")
+        run(["dd", "if=/dev/zero", f"of={dev}", f"bs={S}", f"seek={gap}", f"count={first - gap}",
+             "conv=notrunc,fsync", "status=none"])
     log(f"Writing U-Boot (sectors {first}-{end - 1}) from {os.path.basename(c.uboot_img)}")
     run(["dd", f"if={c.uboot_img}", f"of={dev}", f"bs={S}", f"skip={first}", f"seek={first}",
          f"count={end - first}", "conv=notrunc,fsync", "status=none"])
@@ -1587,27 +1591,6 @@ def copy_from_darkos_boot(c: Choices, name: str, dst_dir: str):
     with mounted(c, img, "vfat", "drkimg", loop_opts) as drk:
         need_file(f"{drk}/{name}")
         shutil.copyfile(f"{drk}/{name}", f"{dst_dir}/{name}")
-
-
-def package_item(image: str, sector: int, name: str) -> bytes:
-    """An item (u-boot, monitor, dtbo, dtb) of the Allwinner boot package at sector of
-    image: "sunxi-package" header, item count at 0x20, items of 0x170 bytes from 0x3c
-    ("IIE;"/"MIE;", name at +4, data offset and length at +0x44/+0x48)."""
-    with open(image, "rb") as f:
-        f.seek(sector * S)
-        head = f.read(0x3c + 16 * 0x170)
-        if not head.startswith(b"sunxi-package"):
-            die(f"no Allwinner boot package at sector {sector} of {image}")
-        for i in range(int.from_bytes(head[0x20:0x24], "little")):
-            item = head[0x3c + i * 0x170:0x3c + (i + 1) * 0x170]
-            if item[4:68].split(b"\0")[0] == name.encode():
-                off, length = int.from_bytes(item[0x44:0x48], "little"), int.from_bytes(item[0x48:0x4c], "little")
-                f.seek(sector * S + off)
-                data = f.read(length)
-                if name.startswith("dtb") and not data.startswith(bytes.fromhex("d00dfeed")):
-                    die(f"boot package item {name} in {image} is not a dtb")
-                return data
-    die(f"no {name} in the boot package of {image}")
 
 
 def env_parse(blob: bytes, where: str) -> list:

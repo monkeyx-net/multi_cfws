@@ -30,18 +30,17 @@
                   [319488, 16777216, "image p5: ext4 rootfs 8G"],
                   [188416, 131072, "image p4: Android boot image 64M (same kernel as knulli's)"]]
   },
-  "_dtb": "none loaded from files. MustardOS's own U-Boot dtb goes raw into partition dtb_mustardos (os_opts uboot_dtb): its input setup needs the input device name muOS-Input-Source, which knulli's dtb calls 'Anbernic RG CubeXX Controller'. fatload/fatwrite mmc 0:N don't work on this U-Boot (tested), sunxi_flash read by name does",
+  "_dtb": "none: both OSes boot with knulli's U-Boot dtb (bootm always passes U-Boot's own control dtb; fdt addr is ignored, tested). MustardOS's input daemon needs the input device name muOS-Input-Source, so its branch renames gpio_keys in that dtb with fdt set (tested). fatload/fatwrite mmc 0:N don't work on this U-Boot (tested)",
   "dtb": {},
   "uuids": {},
-  "_os_opts": "knulli boot_files: checked on KNULLI (kernel and ramdisk are in its Android boot image). mustardos uboot_dtb: sector of the boot package in its image",
+  "_os_opts": "knulli boot_files: checked on KNULLI (kernel and ramdisk are in its Android boot image).",
   "os_opts": {
-    "knulli": {"boot_files": ["boot/knulli"]},
-    "mustardos": {"uboot_dtb": 32800}
+    "knulli": {"boot_files": ["boot/knulli"]}
   },
   "os_boot_ini": [],
   "unique_labels": ["KNULLI", "SHARE"],
   "numbers": [
-    ["ENV", "MUS_BOOT", "KNU_BOOT", "KNU_SHARE", "MUS_ROOT", "KNU_ABOOT", "MUS_ABOOT", "MUS_DTB", "MUS_ROM"]
+    ["ENV", "MUS_BOOT", "KNU_BOOT", "KNU_SHARE", "MUS_ROOT", "KNU_ABOOT", "MUS_ABOOT", "MUS_ROM"]
   ],
   "untested": {"env-h700": ["knulli", "mustardos"]}
 }
