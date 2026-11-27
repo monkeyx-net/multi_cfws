@@ -61,8 +61,16 @@ ARK_ROOT_SIZE = 12 * GIB         # ArkOS's own first boot grows its ext4 to ~11G
 ARK_BOOT_LABEL = "ARKBOOT"
 ARK_ROMS_LABEL = "ARKROMS"
 
-KEY_NAMES = ("Vol-", "Vol+")     # keys are handed out in this order
+KEY_NAMES = ("Vol-", "Vol+")     # keys are handed out in this order, then extra_keys
 KEY_VARS = ("volminus", "volplus")
+
+
+@dataclass
+class Key:
+    """A power-on key (or a combination: several pins held together)."""
+    name: str                    # Vol-, Vol+, L1, L1+R1
+    var: str                     # its ${key} value in boot.scr
+    pins: tuple                  # GPIO numbers, all active low
 
 
 @dataclass
@@ -100,7 +108,14 @@ class Device:
     env_src: tuple = ()          # env-* boot modes: [start, size] of the U-Boot env partition
     env_size: int = 0            # in the uboot_os image, and the env's size in bytes
     gpt_entries: int = 0         # GPT entry array length (0: sfdisk's 128, sectors 2-33)
+    extra_keys: tuple = ()       # keys after Vol-/Vol+ for more OSes: {name, var, pins}
     image_notes: tuple = ()      # (os, text): where an image's partitions differ from the JSON
+
+    @property
+    def keys(self) -> list:
+        """Vol-, Vol+, then extra_keys: the order keys are handed out to the OSes."""
+        vol = [Key(n, v, (p,)) for n, v, p in zip(KEY_NAMES, KEY_VARS, self.key_pins)]
+        return vol + [Key(k["name"], k["var"], tuple(k["pins"])) for k in self.extra_keys]
 
     @property
     def gpt(self) -> bool:
@@ -194,6 +209,7 @@ def load_device(key: str, imgdir: str) -> Device:
     dev = Device(key=key, **{**d,
         "all_os": tuple(d["all_os"]), "key_pins": tuple(d["key_pins"]),
         "uboot_sectors": tuple(d["uboot_sectors"]), "boot": tuple(d["boot"]),
+        "extra_keys": tuple(d.get("extra_keys", ())),
         "env_src": tuple(d.get("env_src", ())),
         "images": images,
         "src": {o: load_src(o, images.get(o, ""), parts, notes) for o, parts in d["src"].items()},
@@ -304,7 +320,7 @@ def usage() -> str:
                         for r in d.boot[:-1])
         lines.append(f"               {d.key}: the {rule['uboot_os']} image{extra}")
     lines += [
-        "  --os       required: comma list naming 2 or 3 of the device's OSes",
+        "  --os       required: comma list naming 2 or more of the device's OSes (up to one more than its keys)",
         "  --default  OS that boots with no key held (default: darkos if selected, else the first --os entry)",
         "  --plan     print the partition layout, key mapping and boot script, then exit (no root, no writes)",
         "The target defaults to /dev/sdb. ERASES THE WHOLE TARGET DEVICE.",
@@ -348,7 +364,7 @@ class Choices:
         d = self.device = load_device(key, IMGDIR)
         all_os = " ".join(d.all_os)
         if not opts["os"]:
-            die(f"--os is required: name 2 or 3 of: {all_os} (see --help)")
+            die(f"--os is required: name 2 to {len(d.keys) + 1} of: {all_os} (see --help)")
 
         self.user_os = []                            # in the order given, deduplicated
         for o in opts["os"].lower().split("\n")[0].split(","):
@@ -359,11 +375,11 @@ class Choices:
                 die(f"unknown OS '{o}' for {d.key} (choose from: {all_os})")
             if o not in self.user_os:
                 self.user_os.append(o)
-        max_os = len(d.key_pins) + 1
+        max_os = len(d.keys) + 1
         if len(self.user_os) < 2:
             die(f"--os needs at least 2 of: {all_os}")
         if len(self.user_os) > max_os:
-            die(f"--os takes at most {max_os} OSes (no key, Vol-, Vol+)")
+            die(f"--os takes at most {max_os} OSes (no key, {', '.join(k.name for k in d.keys)})")
 
         self.default = opts["default"].lower()
         if not self.default:
@@ -533,7 +549,9 @@ def make_layout(c: Choices) -> Layout:
     rom = free // nrom // MIB * MIB
     last = (free - (nrom - 1) * rom) // MIB * MIB
     if not rom > 2 * GIB:
-        die(f"card too small ({c.total} sectors)")
+        need = dry.pos + nrom * (2 * GIB + MIB) + (c.total - end)
+        die(f"card too small ({hsize(c.total)}): {', '.join(c.user_os)} need at least {hsize(need)} "
+            "(each OS's ROM partition at least 2G)")
     rom_sizes = [rom] * (nrom - 1) + [last]
 
     lay = Layout(c, header, first, gap, rom_sizes)
@@ -835,7 +853,7 @@ class DarkOS(OS):
     copied = ("DRK_BOOT", "DRK_ROOT")
     roms = ("DRK_ROMS", "EASYROMS", "dArkOS roms")
     tools = ("btrfs", "tar")
-    boot_ini = "/boot/boot.ini"
+    boot_ini = "/boot.ini"
 
     def prepare(self, c):
         """Do what dArkOS's first boot would do (it would repartition the card)."""
@@ -902,7 +920,7 @@ class ArkOS(OS):
     copied = ("ARK_BOOT", "ARK_ROOT")
     roms = ("ARK_ROMS", ARK_ROMS_LABEL, "ArkOS roms")
     tools = ("e2fsck", "resize2fs", "fatlabel", "tar")
-    boot_ini = "/boot/boot.ini"
+    boot_ini = "/boot.ini"
     INITRD_OLD = b'local dev_id="/dev/mmcblk1p4"'     # scripts/local in the RGB30 uInitrd
     INITRD_NEW = b'local dev_id="$1"'.ljust(len(INITRD_OLD))   # same length: cpio sizes stay valid
 
@@ -1273,19 +1291,21 @@ def install_next(c: Choices, os_key: str, mountpoint: str):
 # ============================================================================ 5. boot script
 def boot_title(c: Choices) -> str:
     title = f"{osname(c.default)} (no key)"
-    for key, os_key in zip(KEY_NAMES, c.key_os):
-        title += f" / {osname(os_key)} ({key})"
+    for key, os_key in zip(c.device.keys, c.key_os):
+        title += f" / {osname(os_key)} ({key.name})"
     return title
 
 
 def boot_branches(c: Choices) -> str:
-    """if <Vol- held> ... elif <Vol+ held> ... else <default> fi"""
+    """if <Vol- held> ... elif <Vol+ held> ... else <default> fi. Key combinations
+    (L1+R1) are tested before their single keys."""
     text = ""
-    for i, os_key in enumerate(c.key_os):
+    pairs = sorted(zip(c.device.keys, c.key_os), key=lambda p: -len(p[0].pins))
+    for i, (key, os_key) in enumerate(pairs):
         if c.bootmode == "ini":
-            cond = f"gpio input {c.device.key_pins[i]}"
+            cond = " && ".join(f"gpio input {pin}" for pin in key.pins)
         else:
-            cond = f'test "${{key}}" = "{KEY_VARS[i]}"'
+            cond = f'test "${{key}}" = "{key.var}"'
         text += f"{'if' if i == 0 else 'elif'} {cond}; then\n" + OS_BY_KEY[os_key].branch(c)
     if c.bootmode != "ini":                  # one-shot request from multiboot-next (no key held)
         for os_key in c.key_os:
@@ -1337,7 +1357,7 @@ def boot_ini_g350(c: Choices) -> str:
     ]
     if c.sel("amberelec"):
         lines.append("# AmberELEC updates overwrite this file: restore it from boot.ini.dualboot.")
-    return "\n".join(lines) + "\n\n" + boot_branches(c)
+    return "\n".join(lines) + "\n\n" + extra_keys_block(c) + boot_branches(c)
 
 
 def keys_block(c: Choices) -> str:
@@ -1348,7 +1368,18 @@ def keys_block(c: Choices) -> str:
     path = f"{BOOT_DIR}/keys.{c.bootmode}.cmd"
     if not os.path.isfile(path):
         die(f"missing {path}")
-    return "\n" + read(path) + "\n"
+    return "\n" + read(path) + extra_keys_block(c) + "\n"
+
+
+def extra_keys_block(c: Choices) -> str:
+    """Cards with more OSes than the volume keys cover: src/boot/keys.<bootmode>.extra.cmd
+    (pull-ups and reading of the device's extra_keys), appended to the key reading."""
+    if len(c.key_os) <= len(KEY_NAMES):
+        return ""
+    path = f"{BOOT_DIR}/keys.{c.bootmode}.extra.cmd"
+    if not os.path.isfile(path):
+        die(f"{c.device.name}: more than {len(KEY_NAMES) + 1} OSes need {path}")
+    return read(path)
 
 
 def boot_cmd_g350(c: Choices) -> str:
@@ -1473,8 +1504,9 @@ def show_plan(c: Choices):
         uboot = " with the ROCKNIX U-Boot" if c.bootmode == "scr-g350" else ""
         print(f"WARNING:  not tested on a {c.device.name}{uboot} yet: {', '.join(untested)}.")
     print(f"Keys:     no key = {osname(c.default)}")
-    for i, os_key in enumerate(c.key_os):
-        print(f"          {KEY_NAMES[i]} (pin {c.device.key_pins[i]}) = {osname(os_key)}")
+    for key, os_key in zip(c.device.keys, c.key_os):
+        pins = f"pin {key.pins[0]}" if len(key.pins) == 1 else "pins " + "+".join(map(str, key.pins))
+        print(f"          {key.name} ({pins}) = {osname(os_key)}")
     if c.scr:
         print(f"Next:     multiboot-next OS boots OS once ({NEXT_FILE} on p{c.n('BOOTSEL')}; a held key wins)")
         for os_key in c.user_os:
@@ -1634,6 +1666,17 @@ def preflight(c: Choices):
     for t in dict.fromkeys(tools):
         if not shutil.which(t):
             die(f"missing tool: {t}")
+
+    # The kernel must mount these (checked now: a failed mount comes after the card is erased).
+    kver = os.uname().release
+    for fs in ["vfat", "ext4", "exfat"] + (["btrfs"] if c.sel("darkos") else []):
+        run(["modprobe", "-q", fs], check=False)
+        with open("/proc/filesystems") as f:
+            if fs not in f.read().split():
+                if not os.path.isdir(f"/lib/modules/{kver}"):
+                    die(f"the kernel can't mount {fs}: /lib/modules/{kver} is missing (the kernel "
+                        "was updated since boot); reboot and run again")
+                die(f"the kernel can't mount {fs} (no {fs} module for kernel {kver})")
 
     # Guard against the wrong disk: a whole removable disk (USB reader) or an SD slot
     # (mmcblk), 32GB-2TiB (MBR limit). The layout itself scales to the card size and

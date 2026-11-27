@@ -1,6 +1,7 @@
 # CLAUDE.md
 
-Builds a multi-boot SD card with 2 or 3 OSes for one device (`--device`). `--os` is
+Builds a multi-boot SD card with 2 to 6 OSes for one device (`--device`; up to one more
+than the device's keys: G350 6, RGB30 4, CubeXX 3). `--os` is
 required and must name them; there is no "all" default:
 the G350 (RK3326; dArkOS, AmberELEC, ArkOS, knulli, MustardOS, ROCKNIX; the default), the
 RGB30 (RK3566; dArkOS, ArkOS, knulli, ROCKNIX) or the RG CubeXX (H700; knulli, MustardOS, ROCKNIX). Everything lives in `src/`: `flash-dualboot.py` (Python 3.8+,
@@ -43,8 +44,9 @@ printed sfdisk script into `sfdisk` on a sparse file
 (`truncate -s $((122070312*512)) card.img`) and compare `sfdisk -d card.img` with the
 printed `Numbers:` line.
 
-For the G350 with ROCKNIX, also run the 6 combinations of 2–3 OSes that include
-`rocknix` (at most 3 OSes: no key + 2 keys).
+For the G350 with ROCKNIX, also run the combinations that include `rocknix`. Cards with
+4+ OSes need a bigger card than `--plan`'s default 62.5GB: give a sparse file as the
+target (`truncate -s 128G card128`; `blockdev --getsz` reads its size).
 
 For the CubeXX, run `--device cubexx` for `knulli,mustardos`, `knulli,rocknix`,
 `mustardos,rocknix` and `knulli,mustardos,rocknix` with each default (the same sfdisk
@@ -55,8 +57,8 @@ built env (config line `<file> 0x0 0x20000`).
 For the RGB30, do the same with `--device rgb30` for `darkos,knulli,rocknix`,
 `darkos,knulli`, `darkos,rocknix` and `knulli,rocknix` with each default.
 
-ArkOS (both devices) and knulli on the G350 add many more combinations (G350: every 2–3 of
-6 OSes; RGB30: every 2–3 of 4). Script it: run `--plan` for each combination and default,
+ArkOS (both devices) and knulli on the G350 add many more combinations (G350: every 2–6 of
+6 OSes, 223 plans over all three devices with each default; RGB30: every 2–4 of 4). Script it: run `--plan` for each combination and default,
 feed each sfdisk script to `sfdisk` on a sparse file and compare the partitions with the
 listing and the `Numbers:` line.
 
@@ -128,8 +130,12 @@ Vol- AmberELEC, Vol+ MustardOS.
   The disk ID is set in the sfdisk script.
 - **Key mapping:** the default OS gets no key. The other OSes, in `Device.all_os` order
   (amberelec, arkos, darkos, knulli, mustardos, rocknix), get Vol- (pin 65) and then Vol+ (pin 64)
-  (`c.key_os`). Both keys are active low, and in `ini` mode `gpio input N` succeeds only
-  while the key is held.
+  (`c.key_os`), then the JSON `extra_keys` (`Device.keys`): L1 (GPIO2_A6, pin 70), R1
+  (GPIO2_A7, pin 71), L1+R1 (both held; tested before single keys in `boot_branches`). All
+  active low; in `ini` mode `gpio input N` succeeds only while the key is held. The extra
+  keys need pull-ups (`mw.l 0xff140070 0xf0005000`, A6/A7 only) and their reading is
+  `src/boot/keys.<bootmode>.extra.cmd`, added only on cards with more than 3 OSes
+  (`extra_keys_block`), so 2–3 OS output is unchanged. Extra keys untested on a device.
 
 ## Constraints that are easy to break (RGB30)
 
@@ -159,6 +165,7 @@ the GPT layout below then replaced that).
   pull-ups with `mw.l` (SYS_GRF `0xfdc600a0`/`0xfdc600a4`), copies GPIO3 EXT_PORT
   (`0xfe760070`) to RAM with `cp.l` and compares bytes with `itest.b` (Vol+ = byte 0 <
   0x80, Vol- = byte 1 == 0xfe/0x7e). Keys: `all_os` order arkos, darkos, knulli, rocknix.
+  A 4th OS gets L1 (GPIO3_B1, byte 1 == 0xfd/0x7d; `keys.scr-rgb30.extra.cmd`, untested).
 - **ArkOS (RGB30)**: its initramfs hard-codes `/dev/mmcblk1p4` like dArkOS's. dArkOS
   keeps p3/p4/p5; ArkOS's `uInitrd` is patched instead (`ArkOS.patch_initrd`: the
   `local dev_id=` line in `scripts/local` back to `"$1"`, same length, regzipped), so it

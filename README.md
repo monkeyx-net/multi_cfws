@@ -49,8 +49,20 @@ and the default settings:
 
 In general, the `--default` OS boots with no key held. The other selected OSes,
 in the fixed order AmberELEC, ArkOS, dArkOS, knulli, MustardOS, ROCKNIX, get Vol- and
-then Vol+. The
-script prints the mapping before it asks for confirmation.
+then Vol+, and on cards with more OSes the next keys:
+
+| Device | OSes per card | Keys after Vol-/Vol+ |
+|---|---|---|
+| G350 | 2–6 | L1, R1, then L1+R1 held together |
+| RGB30 | 2–4 | L1 |
+| CubeXX | 2–3 | none |
+
+So all 6 G350 images fit on one card, and all 4 RGB30 images. The script prints the
+mapping before it asks for confirmation. More OSes need a bigger card: each OS's ROM
+partition must be at least 2G, and the script says how big the card must be if it is too
+small (all 6 on the G350 need about 68G, so a 128G card). **Untested on a device:** the
+L1/R1 keys (the volume keys are tested). Their pull-ups are set the same way as the
+volume keys' in the boot script.
 
 ### Booting another OS once (`multiboot-next`)
 
@@ -537,9 +549,10 @@ sudo IMGDIR=/path/to/images python3 src/flash-dualboot.py --os darkos,mustardos 
 ```
 
 - `--device`: `g350` (default), `rgb30` or `cubexx`.
-- `--os` (required): comma list naming 2 or 3 OSes of that device. There is no
-  default: G350 `amberelec arkos darkos knulli mustardos rocknix`, RGB30
-  `arkos darkos knulli rocknix`, CubeXX `knulli mustardos`.
+- `--os` (required): comma list naming 2 or more OSes of that device (up to 6 on the
+  G350, 4 on the RGB30, 3 on the CubeXX). There is no default: G350
+  `amberelec arkos darkos knulli mustardos rocknix`, RGB30 `arkos darkos knulli rocknix`,
+  CubeXX `knulli mustardos rocknix`.
 - `--default`: the OS that boots with no key held. Must be one of `--os`. Default:
   dArkOS if selected, otherwise the first OS listed in `--os`.
 - `--plan`: print the key mapping, partition layout, sfdisk script and generated
