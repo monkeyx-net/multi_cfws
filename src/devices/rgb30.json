@@ -12,21 +12,22 @@
   "boot": [
     {"bootmode": "scr-rgb30", "uboot_os": "knulli"}
   ],
+  "_images": "file names in img/; * matches any text (the newest matching file, by modification time, is used); a plain name pins one file",
   "images": {
-    "arkos": "ArkOS_RGB30_v2.0_02092025.img",
-    "darkos": "dArkOS_RGB30_trixie_11092026.img",
-    "knulli": "knulli-rk3568-powkiddy-rgb30-scarab-20260510.img",
-    "rocknix": "ROCKNIX-RK3566.aarch64-20261101-Generic.img"
+    "arkos": "ArkOS_RGB30_*.img",
+    "darkos": "dArkOS_RGB30_*.img",
+    "knulli": "knulli-rk3568-powkiddy-rgb30-*.img",
+    "rocknix": "ROCKNIX-RK3566.aarch64-*-Generic.img"
   },
-  "_src": "partitions copied from each image, in order: [start, size, what] in sectors",
+  "_src": "partitions copied from each image, in order: [\"pN\", start, size, what]: partition N of the image; start/size (sectors) are read from the image's partition table when it is present (a difference is shown as NOTE in --plan) and are only the fallback",
   "src": {
-    "arkos": [[32768, 204800, "image p3: FAT BOOT 100M (GPT)"],
-              [237568, 15208047, "image p4: ext4 root 7.3G"]],
-    "darkos": [[32768, 202752, "image p3: FAT dArkOS_Fat 99M (GPT)"],
-               [237568, 15208047, "image p4: btrfs ROOTFS 7.3G"]],
-    "knulli": [[32768, 8388608, "FAT KNULLI 4G (GPT); SHARE is recreated"]],
-    "rocknix": [[32768, 4194304, "FAT ROCKNIX 2G (GPT)"],
-                [4227072, 65536, "ext4 STORAGE 32M"]]
+    "arkos": [["p3", 32768, 204800, "image p3: FAT BOOT 100M (GPT)"],
+              ["p4", 237568, 15208047, "image p4: ext4 root 7.3G"]],
+    "darkos": [["p3", 32768, 202752, "image p3: FAT dArkOS_Fat 99M (GPT)"],
+               ["p4", 237568, 15208047, "image p4: btrfs ROOTFS 7.3G"]],
+    "knulli": [["p1", 32768, 8388608, "FAT KNULLI 4G (GPT); SHARE is recreated"]],
+    "rocknix": [["p1", 32768, 4194304, "FAT ROCKNIX 2G (GPT)"],
+                ["p2", 4227072, 65536, "ext4 STORAGE 32M"]]
   },
   "_dtb": "from each OS's extlinux.conf (knulli, RGB30 v2 panel: boot/rk3566-rgb30-v2-linux.dtb)",
   "dtb": {

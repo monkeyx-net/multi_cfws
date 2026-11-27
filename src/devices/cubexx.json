@@ -18,20 +18,21 @@
   "_env": "U-Boot env inside the uboot_os image: [start, size] of its 'env' partition; the env itself is the first env_size bytes (CRC32 + data)",
   "env_src": [114688, 32768],
   "env_size": 131072,
+  "_images": "file names in img/; * matches any text (the newest matching file, by modification time, is used); a plain name pins one file",
   "images": {
-    "knulli": "knulli-h700-rg-cubexx-scarab-20260511.img",
-    "mustardos": "MustardOS_RGCUBEXX-H_2606.0_ANDROMEDA-db2a3bd0.img",
-    "rocknix": "ROCKNIX-H700.aarch64-20261101-DDR3.img"
+    "knulli": "knulli-h700-rg-cubexx-*.img",
+    "mustardos": "MustardOS_RGCUBEXX-H_*.img",
+    "rocknix": "ROCKNIX-H700.aarch64-*-DDR3.img"
   },
-  "_src": "partitions copied from each image, in order: [start, size, what] in sectors",
+  "_src": "partitions copied from each image, in order: [\"pN\", start, size, what]: partition N of the image; start/size (sectors) are read from the image's partition table when it is present (a difference is shown as NOTE in --plan) and are only the fallback",
   "src": {
-    "knulli": [[147456, 10485760, "image p3: FAT KNULLI 5G (boot-resource); its ext4 SHARE is replaced"],
-               [73728, 40960, "image p1: Android boot image 20M (stock 4.9.170 kernel + ramdisk)"]],
-    "mustardos": [[90112, 65536, "image p2: FAT BOOT 32M (boot-resource, bootlogo.bmp)"],
-                  [319488, 16777216, "image p5: ext4 rootfs 8G"],
-                  [188416, 131072, "image p4: Android boot image 64M (same kernel as knulli's)"]],
-    "rocknix": [[32768, 4194304, "image p1: FAT ROCKNIX 2G (KERNEL, SYSTEM, device_trees)"],
-                [4227072, 65536, "image p2: ext4 STORAGE 32M"]]
+    "knulli": [["p3", 147456, 10485760, "image p3: FAT KNULLI 5G (boot-resource); its ext4 SHARE is replaced"],
+               ["p1", 73728, 40960, "image p1: Android boot image 20M (stock 4.9.170 kernel + ramdisk)"]],
+    "mustardos": [["p2", 90112, 65536, "image p2: FAT BOOT 32M (boot-resource, bootlogo.bmp)"],
+                  ["p5", 319488, 16777216, "image p5: ext4 rootfs 8G"],
+                  ["p4", 188416, 131072, "image p4: Android boot image 64M (same kernel as knulli's)"]],
+    "rocknix": [["p1", 32768, 4194304, "image p1: FAT ROCKNIX 2G (KERNEL, SYSTEM, device_trees)"],
+                ["p2", 4227072, 65536, "image p2: ext4 STORAGE 32M"]]
   },
   "_dtb": "knulli and MustardOS boot with knulli's U-Boot control dtb (bootm always passes it; plain fdt addr is ignored, tested); MustardOS's branch renames gpio_keys in it with fdt set (muinput needs muOS-Input-Source, tested). rocknix: its dtb on its FAT, fixed (os_opts dtb_fixes) and written raw to dtb_rocknix; its branch switches the control dtb to it with fdt addr -c (untested). fatload/fatwrite mmc 0:N don't work on this U-Boot (tested)",
   "dtb": {"rocknix": "device_trees/sun50i-h700-anbernic-rgcubexx.dtb"},

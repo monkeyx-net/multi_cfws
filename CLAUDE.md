@@ -271,10 +271,15 @@ the GPT layout below then replaced that).
 
 ## Image-specific values
 
-Image file names (`images`), the source partition offsets/sizes (`src`,
-`[start, size, note]` taken from `sfdisk -d <image>`; for the RGB30 dArkOS image they are its
-p3/p4) and the dtb paths (`dtb`) in `src/devices/<device>.json` are tied to specific image
-releases. When an image is updated, re-check them and the filesystem UUIDs
+Image file names (`images`) may contain `*`: `resolve_image` uses the newest matching
+file in `img/` (by mtime); a plain name pins one file. `--plan` prints the chosen files
+(`Images:`). The source partitions (`src`, `["pN", start, size, note]`) name partition N
+of the image; `load_src` reads start/size from the image's MBR/GPT (`image_partitions`)
+when the image exists and uses those, printing a `NOTE:` in `--plan` when they differ
+from the JSON values (the fallback when the image is missing; for the RGB30 dArkOS image
+they are its p3/p4). So a new release usually needs no JSON change. Still tied to a
+release: the dtb paths (`dtb`), `env_src` (CubeXX), `os_opts` values and the filesystem
+UUIDs
 (`uuids`: `AMB_*`, `RNX_*`) used in the boot commands and the verification step. Images
 are read from `img/` at the repo root by default (git-ignored except `img/.gitkeep`;
 override with `IMGDIR=`).

@@ -67,9 +67,12 @@ KEY_VARS = ("volminus", "volplus")
 
 @dataclass
 class Src:
-    """A partition inside an image file (start and size in sectors, from sfdisk -d)."""
+    """A partition inside an image file (start and size in sectors). part: its number in
+    the image; then start/size are read from the image's own partition table when the
+    image is present (image_partitions), and the JSON values are only the fallback."""
     start: int
     size: int
+    part: int = 0
 
 
 @dataclass
@@ -97,6 +100,7 @@ class Device:
     env_src: tuple = ()          # env-* boot modes: [start, size] of the U-Boot env partition
     env_size: int = 0            # in the uboot_os image, and the env's size in bytes
     gpt_entries: int = 0         # GPT entry array length (0: sfdisk's 128, sectors 2-33)
+    image_notes: tuple = ()      # (os, text): where an image's partitions differ from the JSON
 
     @property
     def gpt(self) -> bool:
@@ -112,6 +116,67 @@ DEVICE_FIELDS = ("name", "soc", "all_os", "key_pins", "table", "layout", "uboot_
                  "numbers", "untested")
 
 
+def resolve_image(imgdir: str, name: str) -> str:
+    """An image name from the JSON: a file in imgdir, or a pattern (* ? [) of which the
+    newest matching file (by modification time) is used. No match: the name as given."""
+    path = f"{imgdir}/{name}"
+    if not any(ch in name for ch in "*?["):
+        return path
+    found = [f for f in glob.glob(path) if os.path.isfile(f)]
+    return max(found, key=lambda f: (os.path.getmtime(f), f)) if found else path
+
+
+def image_partitions(path: str) -> dict:
+    """Partition number -> (start, size) in sectors, from an image's MBR (primary
+    partitions) or GPT. Empty if the file has neither."""
+    with open(path, "rb") as f:
+        mbr = f.read(S)
+        if len(mbr) < S or mbr[510:512] != b"\x55\xaa":
+            return {}
+        ents = [struct.unpack_from("<4xB3xII", mbr, 0x1BE + 16 * i) for i in range(4)]
+        if not any(t == 0xEE for t, _, _ in ents):
+            return {i + 1: (start, size) for i, (t, start, size) in enumerate(ents) if t}
+        f.seek(S)
+        head = f.read(92)
+        if head[:8] != b"EFI PART":
+            return {}
+        lba, count, esize = struct.unpack_from("<QII", head, 72)
+        f.seek(lba * S)
+        raw = f.read(count * esize)
+    parts = {}
+    for i in range(count):
+        e = raw[i * esize:(i + 1) * esize]
+        if len(e) == esize and e[:16] != bytes(16):
+            first, last = struct.unpack_from("<QQ", e, 32)
+            parts[i + 1] = (first, last - first + 1)
+    return parts
+
+
+def load_src(o: str, image: str, entries: list, notes: list) -> tuple:
+    """An OS's "src" entries: [start, size, note] or ["pN", start, size, note]. With "pN"
+    and the image present, start/size come from the image's partition N."""
+    srcs = []
+    for e in entries:
+        if isinstance(e[0], str):
+            srcs.append(Src(e[1], e[2], int(e[0].lstrip("p"))))
+        else:
+            srcs.append(Src(e[0], e[1]))
+    if not any(s.part for s in srcs) or not os.path.isfile(image):
+        return tuple(srcs)
+    table = image_partitions(image)
+    for s in srcs:
+        if not s.part:
+            continue
+        if s.part not in table:
+            die(f"{os.path.basename(image)} has no partition {s.part} (devices JSON src.{o})")
+        start, size = table[s.part]
+        if (start, size) != (s.start, s.size):
+            notes.append((o, f"{os.path.basename(image)} p{s.part}: start {start}, size {size} "
+                         f"(the JSON says {s.start}, {s.size}; using the image's)"))
+            s.start, s.size = start, size
+    return tuple(srcs)
+
+
 def load_device(key: str, imgdir: str) -> Device:
     """src/devices/<key>.json -> Device. Keys starting with "_" are comments."""
     path = f"{DEVICE_DIR}/{key}.json"
@@ -124,14 +189,16 @@ def load_device(key: str, imgdir: str) -> Device:
     if missing:
         die(f"{path}: missing {', '.join(missing)}")
     d = {k: v for k, v in d.items() if not k.startswith("_")}
+    images = {o: resolve_image(imgdir, f) for o, f in d["images"].items()}
+    notes = []
     dev = Device(key=key, **{**d,
         "all_os": tuple(d["all_os"]), "key_pins": tuple(d["key_pins"]),
         "uboot_sectors": tuple(d["uboot_sectors"]), "boot": tuple(d["boot"]),
         "env_src": tuple(d.get("env_src", ())),
-        "images": {o: f"{imgdir}/{f}" for o, f in d["images"].items()},
-        "src": {o: tuple(Src(p[0], p[1]) for p in parts) for o, parts in d["src"].items()},
+        "images": images,
+        "src": {o: load_src(o, images.get(o, ""), parts, notes) for o, parts in d["src"].items()},
         "os_boot_ini": tuple(d["os_boot_ini"]), "unique_labels": tuple(d["unique_labels"]),
-        "numbers": tuple(tuple(g) for g in d["numbers"])})
+        "numbers": tuple(tuple(g) for g in d["numbers"]), "image_notes": tuple(notes)})
     for o in dev.all_os:
         if o not in dev.images or o not in dev.src:
             die(f"{path}: {o} has no image or src")
@@ -1393,6 +1460,12 @@ def show_plan(c: Choices):
     print(f"Device:   {c.device.name}")
     print(f"OSes:     {' '.join(c.user_os)}")
     print(f"U-Boot:   {os.path.basename(c.uboot_img)} (always needed{note})")
+    used = [o for o in c.device.all_os if c.sel(o)]
+    print("Images:   " + "\n          ".join(f"{osname(o)}: {os.path.basename(c.device.images[o])}"
+                                          for o in used))
+    for o, text in c.device.image_notes:
+        if c.sel(o) or c.device.images[o] == c.uboot_img:
+            print(f"NOTE:     {text}")
     if c.bootmode == "scr-g350" and c.sel("mustardos"):
         print("WARNING:  MustardOS has not been tested with the ROCKNIX U-Boot (needed for ROCKNIX).")
     untested = [osname(o) for o in c.device.untested.get(c.bootmode, ()) if c.sel(o)]

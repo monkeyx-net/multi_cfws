@@ -27,6 +27,17 @@ Put the images in `img/` at the repo root (git-ignored; set `IMGDIR` to use
 another folder). **Always needed on the G350: the dArkOS G350 image**, even when
 dArkOS is not installed. The card's U-Boot (and `logo.bmp`) come from it.
 
+**New image releases:** just put the new `.img` in `img/`. Each device's JSON names
+its images with a `*` for the date or version (e.g. `dArkOS_G350_*.img`), and the
+script uses the newest matching file (by file date). `--plan` shows which files it
+picked (`Images:`). The script reads the partitions to copy from each image's own
+partition table, so a new release with different partition sizes still works; `--plan`
+shows a `NOTE:` line when they differ from the JSON. Older images can stay in `img/`;
+to use one, delete or move the newer one, or write its exact file name in the JSON.
+Things a new release could still break (paths inside the image, such as dtb names, and
+the filesystem UUIDs AmberELEC and ROCKNIX boot with on the G350) are checked during
+the real run, which stops with an error rather than build a card that won't boot.
+
 Hold a key at power-on to pick the OS. With `--os amberelec,darkos,mustardos`
 and the default settings:
 
@@ -583,8 +594,8 @@ are `btrfs-progs`, `exfatprogs`, `squashfs-tools` and `u-boot-tools`.
 ## Files
 
 - `src/flash-dualboot.py`: builds the card (see Usage); one class per OS
-- `src/devices/<device>.json`: per-device data: image file names, the partitions copied
-  from each image, dtbs, key pins, filesystem UUIDs, which U-Boot is used
+- `src/devices/<device>.json`: per-device data: image file names (with `*`), the
+  partitions copied from each image (by partition number), dtbs, key pins, filesystem UUIDs, which U-Boot is used
 - `src/boot/<os>.<bootmode>.cmd`: each OS's U-Boot commands in the shared boot script
   (`env-h700`: in the CubeXX env, one variable per OS);
   `src/boot/keys.<bootmode>.cmd`: the key reading

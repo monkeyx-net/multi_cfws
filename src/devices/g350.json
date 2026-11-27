@@ -13,27 +13,28 @@
     {"if": "rocknix", "bootmode": "scr-g350", "uboot_os": "rocknix"},
     {"bootmode": "ini", "uboot_os": "darkos"}
   ],
+  "_images": "file names in img/; * matches any text (the newest matching file, by modification time, is used); a plain name pins one file",
   "images": {
-    "amberelec": "AmberELEC-RG351MP.aarch64-prerelease-20261019_1835.img",
-    "arkos": "ArkOS_RG351MP_v2.0_12242024.img",
-    "darkos": "dArkOS_G350_trixie_11142026.img",
-    "knulli": "knulli-rk3326-g350-scarab-20260510.img",
-    "mustardos": "MustardOS_RK-G350-V_2606.0_ANDROMEDA-db2a3bd0.img",
-    "rocknix": "ROCKNIX-RK3326.aarch64-20261101-b.img"
+    "amberelec": "AmberELEC-RG351MP.aarch64-*.img",
+    "arkos": "ArkOS_RG351MP_*.img",
+    "darkos": "dArkOS_G350_*.img",
+    "knulli": "knulli-rk3326-g350-*.img",
+    "mustardos": "MustardOS_RK-G350-V_*.img",
+    "rocknix": "ROCKNIX-RK3326.aarch64-*-b.img"
   },
-  "_src": "partitions copied from each image, in order: [start, size, what] in sectors",
+  "_src": "partitions copied from each image, in order: [\"pN\", start, size, what]: partition N of the image; start/size (sectors) are read from the image's partition table when it is present (a difference is shown as NOTE in --plan) and are only the fallback",
   "src": {
-    "amberelec": [[32768, 4194304, "FAT AMBRELC 2G, UUID 1910-5621"],
-                  [4227072, 65536, "ext4 STORAGE 32M, UUID 7ab6cd9f-..."]],
-    "arkos": [[32768, 229376, "FAT BOOT 112M"],
-              [262144, 13721600, "ext4 root 6.5G"]],
-    "darkos": [[32768, 204800, "FAT BOOT 100M"],
-               [237568, 15360000, "btrfs ROOTFS 7.3G"]],
-    "knulli": [[32768, 6291456, "FAT KNULLI 3G; its ext4 p2 is replaced by SHARE"]],
-    "mustardos": [[32768, 1048576, "FAT BOOT 512M (GPT)"],
-                  [1081344, 16777216, "ext4 ROOTFS 8G"]],
-    "rocknix": [[32768, 4194304, "FAT ROCKNIX 2G, UUID 0111-5938"],
-                [4227072, 65536, "ext4 STORAGE 32M, UUID b4434352-..."]]
+    "amberelec": [["p1", 32768, 4194304, "FAT AMBRELC 2G, UUID 1910-5621"],
+                  ["p2", 4227072, 65536, "ext4 STORAGE 32M, UUID 7ab6cd9f-..."]],
+    "arkos": [["p1", 32768, 229376, "FAT BOOT 112M"],
+              ["p2", 262144, 13721600, "ext4 root 6.5G"]],
+    "darkos": [["p1", 32768, 204800, "FAT BOOT 100M"],
+               ["p2", 237568, 15360000, "btrfs ROOTFS 7.3G"]],
+    "knulli": [["p1", 32768, 6291456, "FAT KNULLI 3G; its ext4 p2 is replaced by SHARE"]],
+    "mustardos": [["p1", 32768, 1048576, "FAT BOOT 512M (GPT)"],
+                  ["p2", 1081344, 16777216, "ext4 ROOTFS 8G"]],
+    "rocknix": [["p1", 32768, 4194304, "FAT ROCKNIX 2G, UUID 0111-5938"],
+                ["p2", 4227072, 65536, "ext4 STORAGE 32M, UUID b4434352-..."]]
   },
   "_dtb": "from each OS's boot.ini / extlinux.conf. ArkOS's own rk3326-rg351mp-linux.dtb drives the G350 panel wrong (white, then yellow screen; tested): it gets dArkOS's dtb, same 4.4.189 kernel tree.",
   "dtb": {
