@@ -640,6 +640,7 @@ are `btrfs-progs`, `exfatprogs`, `squashfs-tools` and `u-boot-tools`.
 
 ## Files
 
+- `docs/partition-layouts.md`: diagrams (Mermaid) of each device's full card: partitions, which OS owns them, which key boots what
 - `src/flash-dualboot.py`: builds the card (see Usage); one class per OS
 - `src/devices/<device>.json`: per-device data: image file names (with `*`), the
   partitions copied from each image (by partition number), dtbs, key pins, filesystem UUIDs, which U-Boot is used
