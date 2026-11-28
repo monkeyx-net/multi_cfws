@@ -16,6 +16,7 @@ The file reads top to bottom in the order things happen:
 """
 from __future__ import annotations
 
+import fnmatch
 import glob
 import gzip
 import hashlib
@@ -27,7 +28,10 @@ import stat
 import struct
 import subprocess
 import sys
+import tarfile
 import tempfile
+import time
+import types
 import zlib
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -68,9 +72,22 @@ KEY_VARS = ("volminus", "volplus")
 @dataclass
 class Key:
     """A power-on key (or a combination: several pins held together)."""
-    name: str                    # Vol-, Vol+, L1, L1+R1
+    name: str                    # Vol-, Vol+, L1, L2 (or a combination, e.g. L1+R1)
     var: str                     # its ${key} value in boot.scr
     pins: tuple                  # GPIO numbers, all active low
+
+
+@dataclass
+class Settings:
+    """System / Wi-Fi settings of one OS on one of its partitions (--backup / --restore).
+    The backup finds the partition on the card by fstype + marker, not by number, so it
+    works on any card this script built."""
+    role: str                    # where --restore puts them back (MUS_ROOT, RNX_STOR, ...)
+    fstype: str                  # ext4, btrfs, exfat
+    marker: str                  # path only this OS's partition has, relative to its root
+    paths: tuple                 # files / dirs to back up, relative to the partition root
+                                 # (may contain * ? [...])
+    exclude: tuple = ()          # fnmatch patterns (relative paths) left out
 
 
 @dataclass
@@ -308,7 +325,8 @@ def usage() -> str:
     lines = [
         "Build a multi-boot SD card for the " + " or the ".join(f"{d.name} ({d.soc})" for d in devs) + ".",
         f"Usage: sudo python3 src/flash-dualboot.py [--device {'|'.join(d.key for d in devs)}] "
-        "--os LIST [--default OS] [--plan] [/dev/sdX]",
+        "--os LIST [--default OS] [--restore DIR] [--plan] [/dev/sdX]",
+        "       sudo python3 src/flash-dualboot.py --backup DIR [/dev/sdX]",
     ]
     for i, d in enumerate(devs):
         first = "  --device   " if i == 0 else "             "
@@ -323,20 +341,25 @@ def usage() -> str:
         "  --os       required: comma list naming 2 or more of the device's OSes (up to one more than its keys)",
         "  --default  OS that boots with no key held (default: darkos if selected, else the first --os entry)",
         "  --plan     print the partition layout, key mapping and boot script, then exit (no root, no writes)",
+        "  --backup DIR   copy each OS's system and Wi-Fi settings (not saves) from a card built by",
+        "             this script into DIR/<os>.tar.gz, then exit (read-only; no --os needed)",
+        "  --restore DIR  put those settings back on the new card, for the --os that have one",
         "The target defaults to /dev/sdb. ERASES THE WHOLE TARGET DEVICE.",
     ]
     return "\n".join(lines) + "\n"
 
 
 def parse_args(argv: list) -> dict:
-    opts = {"device": DEFAULT_DEVICE, "os": "", "default": "", "plan": False, "dev": "/dev/sdb"}
+    opts = {"device": DEFAULT_DEVICE, "os": "", "default": "", "plan": False, "dev": "/dev/sdb",
+            "backup": "", "restore": ""}
+    valued = ("--device", "--os", "--default", "--backup", "--restore")
     args = list(argv)
     while args:
         a = args.pop(0)
         name, eq, value = a.partition("=")
-        if name in ("--device", "--os", "--default") and eq:
+        if name in valued and eq:
             opts[name[2:]] = value
-        elif a in ("--device", "--os", "--default"):
+        elif a in valued:
             if not args:
                 die(f"{a} needs a value")
             opts[a[2:]] = args.pop(0)
@@ -357,6 +380,7 @@ class Choices:
 
     def __init__(self, opts: dict):
         self.plan = opts["plan"]
+        self.restore = opts["restore"]               # --restore DIR (settings backup)
         self.dev = opts["dev"]                       # target block device
         key = opts["device"].lower()
         if key not in device_keys():
@@ -761,6 +785,8 @@ LAYOUTS = {"g350": layout_g350, "rgb30": layout_rgb30, "cubexx": layout_cubexx}
 #   tools    commands its steps need (checked before the real run)
 #   boot_ini where src/boot.ini.<os> goes on its BOOT partition (devices listing it in
 #            "os_boot_ini")
+#   settings Settings for --backup / --restore (after_restore re-applies what prepare
+#            set on a file that the restore replaced)
 #   fix_fs / prepare / verify   steps of the real run (copying and mkfs are generic)
 # Its U-Boot commands, as they appear in the shared boot script, are in
 # src/boot/<os>.<bootmode>.cmd (@BOOTX@ = BOOT number in hex, @ROOT@ / @ROOT_PU@ = root
@@ -775,6 +801,7 @@ class OS:
     roms: tuple = ()
     tools: tuple = ()
     boot_ini = ""
+    settings: tuple = ()
 
     def branch(self, c: Choices) -> str:
         path = f"{BOOT_DIR}/{self.key}.{c.bootmode}.cmd"
@@ -819,6 +846,9 @@ class OS:
     def verify(self, c: Choices):
         pass
 
+    def after_restore(self, c: Choices, role: str, mnt: str):
+        pass
+
 
 class AmberELEC(OS):
     """Must be p1/p2/p3: its initramfs is inside KERNEL and mounts mmcblk1p3 as ROMs.
@@ -827,6 +857,17 @@ class AmberELEC(OS):
     copied = ("AMB_BOOT", "AMB_STOR")
     roms = ("AMB_ROMS", "GAMES", "AmberELEC roms")   # AmberELEC creates its folders via tmpfiles.d
     tools = ("e2fsck", "resize2fs", "debugfs", "dumpe2fs")
+    # /storage. Wi-Fi: connman (networks with their passphrases in .cache/connman; wifi.*
+    # also in distribution.conf). userconfig-setup only adds missing defaults on first
+    # boot (rsync --ignore-existing), so restored files are kept.
+    settings = (Settings("AMB_STOR", "ext4", ".config/distribution/configs/distribution.conf", (
+        ".config/distribution/configs/distribution.conf",
+        ".config/emulationstation/es_settings.cfg",
+        ".config/emulationstation/es_input.cfg",
+        ".cache/connman",
+        ".cache/bluetooth",
+        ".cache/system_timezone",
+    )),)
 
     def fix_fs(self, c):
         log("AmberELEC STORAGE: fsck + grow to 8G + remove .please_resize_me")
@@ -854,6 +895,30 @@ class DarkOS(OS):
     roms = ("DRK_ROMS", "EASYROMS", "dArkOS roms")
     tools = ("btrfs", "tar")
     boot_ini = "/boot.ini"
+    # Root fs, as its own "Backup dArkOS Settings.sh" (without RetroArch, Kodi and the
+    # amiberry savestates) plus volume and brightness. Wi-Fi: NetworkManager keyfiles
+    # (root 0600). The ~/.config flag files are what its restore script rebuilds from
+    # es_settings.cfg. First boot does not touch these (firstboot.service is disabled).
+    settings = (Settings("DRK_ROOT", "btrfs", "opt/system/Advanced/Backup dArkOS Settings.sh", (
+        "etc/NetworkManager/system-connections",
+        "etc/localtime",
+        "home/ark/.emulationstation/es_settings.cfg",
+        "home/ark/.emulationstation/collections",
+        "home/ark/.config/.SWAPPOWERANDSUSPEND",
+        "home/ark/.config/.NOVERBALBATTERYWARNING",
+        "home/ark/.config/.MBROLA_VOICE_*",
+        "home/ark/.config/.GameLoadingIMode*",
+        "home/ark/.config/.LOADING_IMAGE_*",
+        "home/ark/.config/.TIMEOUT",
+        "home/ark/.config/panel_settings.txt",
+        "opt/mupen64plus/InputAutoCfg.ini",
+        "opt/drastic/config/drastic.cfg",
+        "var/lib/alsa/asound.state",
+        "var/lib/systemd/backlight",
+        "var/local/asound.state",
+        "home/ark/.config/.BRMODE",
+        "home/ark/.config/filebrowser.db",
+    )),)
 
     def prepare(self, c):
         """Do what dArkOS's first boot would do (it would repartition the card)."""
@@ -921,6 +986,27 @@ class ArkOS(OS):
     roms = ("ARK_ROMS", ARK_ROMS_LABEL, "ArkOS roms")
     tools = ("e2fsck", "resize2fs", "fatlabel", "tar")
     boot_ini = "/boot.ini"
+    # Root fs, as its own "Backup ArkOS Settings.sh" (without RetroArch, Kodi and the
+    # amiberry savestates) plus volume and brightness. Wi-Fi: NetworkManager keyfiles
+    # (root 0600). The ~/.config flag files are what its restore script rebuilds from
+    # es_settings.cfg. First boot does not touch these (firstboot.service is disabled).
+    settings = (Settings("ARK_ROOT", "ext4", "opt/system/Advanced/Backup ArkOS Settings.sh", (
+        "etc/NetworkManager/system-connections",
+        "etc/localtime",
+        "home/ark/.emulationstation/es_settings.cfg",
+        "home/ark/.emulationstation/collections",
+        "home/ark/.config/.SWAPPOWERANDSUSPEND",
+        "home/ark/.config/.NOVERBALBATTERYWARNING",
+        "home/ark/.config/.MBROLA_VOICE_*",
+        "home/ark/.config/.GameLoadingIMode*",
+        "home/ark/.config/.LOADING_IMAGE_*",
+        "home/ark/.config/.TIMEOUT",
+        "home/ark/.config/panel_settings.txt",
+        "opt/mupen64plus/InputAutoCfg.ini",
+        "opt/drastic/config/drastic.cfg",
+        "var/lib/alsa/asound.state",
+        "var/lib/systemd/backlight",
+    )),)
     INITRD_OLD = b'local dev_id="/dev/mmcblk1p4"'     # scripts/local in the RGB30 uInitrd
     INITRD_NEW = b'local dev_id="$1"'.ljust(len(INITRD_OLD))   # same length: cpio sizes stay valid
 
@@ -1006,6 +1092,16 @@ class MustardOS(OS):
     key, name, prefix = "mustardos", "MustardOS", "MUS"
     copied = ("MUS_BOOT", "MUS_ROOT", "MUS_ABOOT")    # ABOOT: CubeXX Android boot image
     roms = ("MUS_ROM", "ROMS", "MustardOS roms")      # MustardOS reformats it on first boot
+    # /opt/muos/config, without what its own settings backup leaves out (script/archive/
+    # settings.sh) and boot/ (factory_reset=1 must stay: the first boot formats ROMS).
+    # Wi-Fi: wpa_supplicant from the profiles in ROMS:/MUOS/network, lost in that format;
+    # its first boot imports a wifi.conf from ROMS before formatting (IMPORT_OEM_PROFILE),
+    # so after_restore writes one from the restored current network (config/network).
+    settings = (Settings("MUS_ROOT", "ext4", "opt/muos/config", ("opt/muos/config",), exclude=tuple(
+        f"opt/muos/config/{d}{tail}" for d in ("boot", "system", "extra", "bluetooth",
+                                               "g350-pstore", "settings/general/audiosink")
+        for tail in ("", "/*"))),)
+    WIFI_KEYS = ("ssid", "pass", "type", "address", "subnet", "gateway", "dns")
     tools = ("e2fsck",)
     boot_ini = "/boot.ini"
     NUM_FILES = {"boot": "MUS_BOOT", "root": "MUS_ROOT", "rom": "MUS_ROM"}
@@ -1054,6 +1150,15 @@ class MustardOS(OS):
             if c.scr:
                 install_next(c, "mustardos", root)
 
+    def after_restore(self, c, role, mnt):
+        net = f"{mnt}/opt/muos/config/network"
+        values = {k: read(f"{net}/{k}").strip() for k in self.WIFI_KEYS if os.path.isfile(f"{net}/{k}")}
+        if role != "MUS_ROOT" or not values.get("ssid"):
+            return
+        log(f"MustardOS: Wi-Fi {values['ssid']} -> wifi.conf on ROMS (imported on its first boot)")
+        with mounted(c, c.part("MUS_ROM"), "exfat", "muroms") as roms:
+            write(f"{roms}/wifi.conf", "".join(f"{k}={v}\n" for k, v in values.items() if v))
+
     def verify(self, c):
         check_label(c, "MUS_ROM", "ROMS")
         check_partuuid(c, "MUS_ROOT")
@@ -1072,6 +1177,21 @@ class Knulli(OS):
     key, name, prefix = "knulli", "knulli", "KNU"
     copied = ("KNU_BOOT", "KNU_ABOOT")                # ABOOT: CubeXX Android boot image
     roms = ("KNU_SHARE", "SHARE", "knulli /userdata")   # what knulli's autoresize would leave
+    # /userdata/system (its factory reset moves that aside). Wi-Fi: connman, rebuilt every
+    # boot from wifi*.ssid/key in knulli.conf; S12populateshare keeps knulli.conf and
+    # es_settings.cfg if present. S08connman runs before /userdata is mounted and reads
+    # knulli-boot.conf instead, so after_restore copies BOOT_KEYS there (what knulli's
+    # S65values4boot does at shutdown); otherwise Wi-Fi only connects from the 2nd boot.
+    settings = (Settings("KNU_SHARE", "exfat", "system/knulli.conf", (
+        "system/knulli.conf",
+        "system/configs/emulationstation/es_settings.cfg",
+        "system/configs/emulationstation/es_input.cfg",
+        "system/bluetooth/bluetooth.tar",
+        "system/network-connman.config",
+    )),)
+    BOOT_KEYS = re.compile(r"(wifi\.(enabled|ssid|key)|wifi[23]\.[^=]*|wifi\.(hidden|adhoc)\.[^=]*|"
+                           r"splash\.screen\.enabled|system\.timezone|es\.resolution|"
+                           r"system\.hostname)=")
     # G350: vibrates from ~3 s after power-on until knulli's logo (its S01pwm stops the
     # rumble motor). Tried from boot.ini, all on a G350: "gpio set 15" (no change), PWM0
     # at 100% duty (no change), that plus pin mux to PWM0 and PWM0 disabled in its dtb
@@ -1101,6 +1221,18 @@ class Knulli(OS):
             with mounted(c, c.part("KNU_SHARE"), "exfat", "knshare") as share:   # /userdata
                 install_next(c, "knulli", share)
 
+    def after_restore(self, c, role, mnt):
+        conf = f"{mnt}/system/knulli.conf"
+        if role != "KNU_SHARE" or not os.path.isfile(conf):
+            return
+        keys = [ln for ln in read(conf).splitlines() if self.BOOT_KEYS.match(ln.strip())]
+        log(f"knulli: {len(keys)} wifi/boot values from knulli.conf -> knulli-boot.conf")
+        with mounted(c, c.part("KNU_BOOT"), "vfat", "knboot") as boot:
+            boot_conf = f"{boot}/knulli-boot.conf"
+            lines = [ln for ln in read(boot_conf).splitlines()
+                     if not self.BOOT_KEYS.match(ln.strip())]
+            write(boot_conf, "\n".join(lines + keys) + "\n")
+
     def verify(self, c):
         check_label(c, "KNU_BOOT", "KNULLI")
         check_label(c, "KNU_SHARE", "SHARE")
@@ -1116,6 +1248,18 @@ class Rocknix(OS):
     copied = ("RNX_BOOT", "RNX_STOR")
     roms = ("RNX_ROMS", "GAMES", "ROCKNIX roms")
     tools = ("e2fsck", "resize2fs", "debugfs", "unsquashfs")
+    # /storage. Wi-Fi: NetworkManager with iwd (keyfiles with the PSK, root 0600; wifi.*
+    # also in system.cfg). Restored after prepare's /usr/config seeding (chksysconfig would
+    # rsync it over system.cfg otherwise); after_restore puts the card's lines back.
+    settings = (Settings("RNX_STOR", "ext4", ".config/system/configs/system.cfg", (
+        ".config/system/configs/system.cfg",
+        ".config/emulationstation/es_settings.cfg",
+        ".config/emulationstation/es_input.cfg",
+        ".config/NetworkManager/system-connections",
+        ".cache/iwd",
+        ".cache/bluetooth",
+        ".cache/system_timezone",
+    ), exclude=("*NETPLAY_AP*",)),)
 
     def boot_values(self, c):
         u = c.device.uuids
@@ -1153,23 +1297,8 @@ class Rocknix(OS):
             run(["cp", "-a", f"{rnsys}/usr/config/.", f"{stor}/.config/"])
             shutil.rmtree(rnsys)
 
-            cfg = f"{stor}/.config/system/configs/system.cfg"
-            need_file(cfg)
             need_file(f"{stor}/.config/retroarch/retroarch.cfg")
-            lines = read(cfg).splitlines()
-            if not any(ln.startswith("system.hostname=") for ln in lines):
-                die("system.hostname missing from ROCKNIX system.cfg")
-            lines = [ln for ln in lines
-                     if not ln.startswith(("system.gamesdevice=", "system.automount="))]
-            lines += ["system.automount=1",
-                      f"system.gamesdevice=/dev/disk/by-partuuid/{c.partuuid(c.n('RNX_ROMS'))}"]
-            if c.device.opt(self.key, "disable_updates"):
-                # An update replaces KERNEL/SYSTEM but not the Android boot image built
-                # below, and its update.sh writes ROCKNIX's own U-Boot over the boot area.
-                lines = [ln for ln in lines if not ln.startswith("updates.enabled=")]
-                lines += ["updates.enabled=0"]
-            write(cfg, "\n".join(lines) + "\n")
-            print("\n".join(grep_n(cfg, r"^(system\.(automount|gamesdevice)|updates\.enabled)=")))
+            self.fix_system_cfg(c, stor)
 
             if c.bootmode == "scr-g350":
                 conf = f"{boot}/extlinux/extlinux.conf.dualboot"
@@ -1180,6 +1309,29 @@ class Rocknix(OS):
                 self.write_vendor_boot(c, boot)
             if c.scr:
                 install_next(c, "rocknix", stor)             # /storage
+
+    def fix_system_cfg(self, c, stor: str):
+        """The card-specific lines of system.cfg (also after --restore replaced it)."""
+        cfg = f"{stor}/.config/system/configs/system.cfg"
+        need_file(cfg)
+        lines = read(cfg).splitlines()
+        if not any(ln.startswith("system.hostname=") for ln in lines):
+            die("system.hostname missing from ROCKNIX system.cfg")
+        lines = [ln for ln in lines
+                 if not ln.startswith(("system.gamesdevice=", "system.automount="))]
+        lines += ["system.automount=1",
+                  f"system.gamesdevice=/dev/disk/by-partuuid/{c.partuuid(c.n('RNX_ROMS'))}"]
+        if c.device.opt(self.key, "disable_updates"):
+            # An update replaces KERNEL/SYSTEM but not the Android boot image built
+            # in prepare, and its update.sh writes ROCKNIX's own U-Boot over the boot area.
+            lines = [ln for ln in lines if not ln.startswith("updates.enabled=")]
+            lines += ["updates.enabled=0"]
+        write(cfg, "\n".join(lines) + "\n")
+        print("\n".join(grep_n(cfg, r"^(system\.(automount|gamesdevice)|updates\.enabled)=")))
+
+    def after_restore(self, c, role, mnt):
+        if role == "RNX_STOR":
+            self.fix_system_cfg(c, mnt)
 
     def write_vendor_boot(self, c, boot: str):
         """CubeXX (vendor U-Boot): KERNEL in an Android boot image (RNX_ABOOT) and the
@@ -1511,6 +1663,9 @@ def show_plan(c: Choices):
         print(f"Next:     multiboot-next OS boots OS once ({NEXT_FILE} on p{c.n('BOOTSEL')}; a held key wins)")
         for os_key in c.user_os:
             print(f"          {osname(os_key)}: {next_path(os_key)}")
+    if c.restore:
+        have = [o.name for o, _ in restore_archives(c)] if os.path.isdir(c.restore) else []
+        print(f"Restore:  {', '.join(have) or 'nothing'} settings from {c.restore}")
     print(f"Partitions on {c.dev} ({hsize(c.total)}):")
     for p in c.lay.parts:
         print(f"  {p.line()}")
@@ -1638,6 +1793,141 @@ def check_partuuid(c: Choices, role: str):
         die(f"PARTUUID of {c.part(role)} is not {want}")
 
 
+# ---------------------------------------------------------------------------- settings
+# --backup DIR: each OS's Settings (system and Wi-Fi settings, not saves) from a card this
+# script built, found by fstype + marker, into DIR/<os>.tar.gz (entries <role>/<path>).
+# --restore DIR: on a real run, after the per-OS steps, unpacked onto the new card.
+RO_OPTIONS = {"ext4": "ro,noload", "btrfs": "ro", "exfat": "ro", "vfat": "ro"}
+# Our own checks (restore) instead of tarfile's filters: "data"/"tar" refuse absolute
+# symlinks such as /etc/localtime, and Python 3.14 uses "data" unless told otherwise.
+TAR_FILTER = {"filter": "fully_trusted"} if hasattr(tarfile, "fully_trusted_filter") else {}
+
+
+def excluded(st: Settings, rel: str) -> bool:
+    return any(fnmatch.fnmatch(rel, pat) for pat in st.exclude)
+
+
+def settings_on_card(dev: str, mnt) -> dict:
+    """{os key: [(Settings, partition), ...]} for the settings found on dev."""
+    found, wanted = {}, {st.fstype for o in ALL_OSES for st in o.settings}
+    parts = [ln.split()[0] for ln in output(["lsblk", "-lnpo", "NAME,TYPE", dev]).splitlines()
+             if ln.split()[1:] == ["part"]]
+    for part in parts:
+        fstype = blkid(part, "TYPE")
+        if fstype not in wanted:
+            continue
+        with mounted(mnt, part, fstype, "probe", RO_OPTIONS[fstype]) as d:
+            hits = [(o, st) for o in ALL_OSES for st in o.settings
+                    if st.fstype == fstype and os.path.lexists(f"{d}/{st.marker}")]
+        if len(hits) > 1:
+            die(f"{part} looks like several OSes' settings: {', '.join(o.name for o, _ in hits)}")
+        for o, st in hits:
+            if any(s2.role == st.role for s2, _ in found.get(o.key, [])):
+                die(f"{o.name} settings ({st.role}) found twice: on {part} and earlier")
+            found.setdefault(o.key, []).append((st, part))
+    return found
+
+
+def backup(dev: str, outdir: str):
+    if os.geteuid() != 0:
+        die("run as root (sudo)")
+    if not is_block(dev):
+        die(f"{dev} is not a block device")
+    check_card(dev)
+    mnt = types.SimpleNamespace(mnt=tempfile.mkdtemp(prefix="multiboot.", dir="/tmp"))
+    try:
+        unmount_dev(dev)
+        found = settings_on_card(dev, mnt)
+        if not found:
+            die(f"no OS settings found on {dev}")
+        os.makedirs(outdir, exist_ok=True)
+        os.chmod(outdir, 0o700)                  # Wi-Fi passwords
+        owner = (int(os.environ["SUDO_UID"]), int(os.environ["SUDO_GID"])) \
+            if "SUDO_UID" in os.environ else None
+        manifest = [f"# --backup of {dev}, {time.strftime('%Y-%m-%d %H:%M:%S')}",
+                    "# os role partition entries"]
+        for o in ALL_OSES:
+            if o.key not in found:
+                continue
+            out = f"{outdir}/{o.key}.tar.gz"
+            with tarfile.open(out, "w:gz") as tar:
+                for st, part in found[o.key]:
+                    log(f"{o.name}: settings from {part} ({st.role}) -> {out}")
+                    count = 0
+
+                    def keep(ti, st=st):
+                        nonlocal count
+                        if excluded(st, ti.name.split("/", 1)[1]):
+                            return None
+                        count += 1
+                        return ti
+
+                    with mounted(mnt, part, st.fstype, "backup", RO_OPTIONS[st.fstype]) as d:
+                        for pattern in st.paths:
+                            paths = sorted(glob.glob(f"{d}/{glob.escape(pattern) if not glob.has_magic(pattern) else pattern}"))
+                            if not paths:
+                                print(f"  not on the card: {pattern}")
+                            for full in paths:
+                                rel = os.path.relpath(full, d)
+                                tar.add(full, arcname=f"{st.role}/{rel}", filter=keep)
+                    print(f"  {count} entries")
+                    manifest.append(f"{o.key} {st.role} {part} {count}")
+            os.chmod(out, 0o600)
+            if owner:
+                os.chown(out, *owner)
+        write(f"{outdir}/manifest.txt", "\n".join(manifest) + "\n")
+        if owner:
+            os.chown(outdir, *owner)
+            os.chown(f"{outdir}/manifest.txt", *owner)
+        log(f"Done: {outdir} ({', '.join(osname(k) for k in found)}). Restore on a new card "
+            f"with --restore {outdir}")
+    finally:
+        cleanup(mnt.mnt)
+
+
+def restore_archives(c: Choices) -> list:
+    """(OS, archive) for the selected OSes that have a backup in --restore DIR."""
+    return [(o, f"{c.restore}/{o.key}.tar.gz") for o in c.oses
+            if o.settings and os.path.isfile(f"{c.restore}/{o.key}.tar.gz")]
+
+
+def restore(c: Choices):
+    for o, path in restore_archives(c):
+        roles = {st.role: st for st in o.settings}
+        with tarfile.open(path) as tar:
+            by_role = {}
+            links = set()
+            for m in tar.getmembers():
+                role, _, rest = m.name.partition("/")
+                parts = rest.split("/")
+                if role not in roles or not rest or m.name.startswith("/") or ".." in parts \
+                        or not (m.isfile() or m.isdir() or m.issym() or m.islnk()):
+                    die(f"{path}: unexpected entry {m.name}")
+                if any("/".join(parts[:i]) in links for i in range(1, len(parts))):
+                    die(f"{path}: {m.name} goes through a symlink in the backup")
+                if m.issym():
+                    links.add(rest)
+                if excluded(roles[role], rest):
+                    continue
+                m.name = rest
+                if m.islnk():
+                    m.linkname = m.linkname.partition("/")[2]
+                by_role.setdefault(role, []).append(m)
+            for role, members in by_role.items():
+                if role not in c.lay.n:
+                    print(f"  {o.name}: no {role} on this card, skipped")
+                    continue
+                st = roles[role]
+                log(f"Restoring {o.name} settings ({len(members)} entries) onto {c.part(role)}")
+                with mounted(c, c.part(role), st.fstype, f"restore-{role.lower()}") as d:
+                    for m in members:            # symlinks already on the card
+                        parent = os.path.realpath(os.path.join(d, os.path.dirname(m.name)))
+                        if not (parent + "/").startswith(d + "/"):
+                            die(f"{path}: {m.name} would land outside {c.part(role)}")
+                    tar.extractall(d, members=members, numeric_owner=True, **TAR_FILTER)
+                    o.after_restore(c, role, d)
+
+
 def preflight(c: Choices):
     """Real run: refuse anything that looks wrong before touching the card."""
     if os.geteuid() != 0:
@@ -1678,23 +1968,35 @@ def preflight(c: Choices):
                         "was updated since boot); reboot and run again")
                 die(f"the kernel can't mount {fs} (no {fs} module for kernel {kver})")
 
-    # Guard against the wrong disk: a whole removable disk (USB reader) or an SD slot
-    # (mmcblk), 32GB-2TiB (MBR limit). The layout itself scales to the card size and
-    # refuses cards too small for the selected OSes (make_layout).
-    name = os.path.basename(os.path.realpath(c.dev))
-    sysfs = f"/sys/block/{name}"
-    if not os.path.isdir(sysfs):
-        die(f"{c.dev} is not a whole disk (give the disk, e.g. /dev/sdb, not a partition)")
-    with open(f"{sysfs}/removable") as f:
-        removable = f.read().strip() == "1"
-    if not (removable or name.startswith("mmcblk")):
-        die(f"{c.dev} is not a removable disk or SD card slot")
+    if c.restore:
+        if not os.path.isdir(c.restore):
+            die(f"--restore: {c.restore} is not a directory")
+        if not restore_archives(c):
+            die(f"--restore: {c.restore} has no backup of {', '.join(c.user_os)} "
+                "(<os>.tar.gz, written by --backup)")
+
+    # The layout itself scales to the card size and refuses cards too small for the
+    # selected OSes (make_layout).
+    check_card(c.dev)
     size = int(output(["blockdev", "--getsize64", c.dev]))
     if not 32 * 1000**3 <= size < 2 * 1024**4:
         die(f"{c.dev} is {size} bytes, expected an SD card of 32GB to 2TiB")
-    if output(["findmnt", "-rno", "SOURCE", "/"], check=False).startswith(c.dev):
-        die(f"{c.dev} holds the running root fs!")
     c.total = int(output(["blockdev", "--getsz", c.dev]))
+
+
+def check_card(dev: str):
+    """Guard against the wrong disk: a whole removable disk (USB reader) or an SD slot
+    (mmcblk), not the disk holding the running system."""
+    name = os.path.basename(os.path.realpath(dev))
+    sysfs = f"/sys/block/{name}"
+    if not os.path.isdir(sysfs):
+        die(f"{dev} is not a whole disk (give the disk, e.g. /dev/sdb, not a partition)")
+    with open(f"{sysfs}/removable") as f:
+        removable = f.read().strip() == "1"
+    if not (removable or name.startswith("mmcblk")):
+        die(f"{dev} is not a removable disk or SD card slot")
+    if output(["findmnt", "-rno", "SOURCE", "/"], check=False).startswith(dev):
+        die(f"{dev} holds the running root fs!")
 
 
 def flash(c: Choices, boot_cfg: str):
@@ -1761,9 +2063,11 @@ def flash(c: Choices, boot_cfg: str):
         o.format(c)
     unmount_dev(dev)
 
-    # 4. per-OS first-boot work
+    # 4. per-OS first-boot work, then the --restore settings
     for o in c.oses:
         o.prepare(c)
+    if c.restore:
+        restore(c)
 
     # 5. shared boot config on p1
     install_boot_config(c, boot_cfg)
@@ -1915,7 +2219,11 @@ def install_boot_config(c: Choices, boot_cfg: str):
 # ============================================================================ main
 def main(argv: list):
     sys.stdout.reconfigure(line_buffering=True)   # keep our output in order with the tools'
-    c = Choices(parse_args(argv))
+    opts = parse_args(argv)
+    if opts["backup"]:
+        backup(opts["dev"], os.path.abspath(opts["backup"]))
+        return
+    c = Choices(opts)
     if c.plan:
         card_size_for_plan(c)
     else:

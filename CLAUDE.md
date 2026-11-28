@@ -131,9 +131,12 @@ Vol- AmberELEC, Vol+ MustardOS.
 - **Key mapping:** the default OS gets no key. The other OSes, in `Device.all_os` order
   (amberelec, arkos, darkos, knulli, mustardos, rocknix), get Vol- (pin 65) and then Vol+ (pin 64)
   (`c.key_os`), then the JSON `extra_keys` (`Device.keys`): L1 (GPIO2_A6, pin 70), R1
-  (GPIO2_A7, pin 71), L1+R1 (both held; tested before single keys in `boot_branches`). All
+  (GPIO2_A7, pin 71), L2 (GPIO3_B2, pin 106, "GPIO TOP-LEFT2" in the dtb; read from GPIO3
+  EXT_PORTA `0xff270050` bit 10 in `scr-g350`). `extra_keys` may also hold combinations
+  (several pins, tested before single keys in `boot_branches`). All
   active low; in `ini` mode `gpio input N` succeeds only while the key is held. The extra
-  keys need pull-ups (`mw.l 0xff140070 0xf0005000`, A6/A7 only) and their reading is
+  keys need pull-ups (`mw.l 0xff140070 0xf0005000`, A6/A7 only; `mw.l 0xff140084
+  0x00300010`, GPIO3_B2 only) and their reading is
   `src/boot/keys.<bootmode>.extra.cmd`, added only on cards with more than 3 OSes
   (`extra_keys_block`), so 2–3 OS output is unchanged. Extra keys untested on a device.
 
@@ -259,6 +262,28 @@ the GPT layout below then replaced that).
   request), and the branches (`boot_branches`) test `${next}` after the key branches, so a
   held key wins.
 - Not yet tested on a device.
+
+## Settings backup (`--backup`, `--restore`)
+
+- Each OS class's `settings` (`Settings`: role, fstype, marker, paths with globs,
+  fnmatch `exclude`) lists its system and Wi-Fi settings, chosen from each image's own
+  backup scripts and first-boot code. `--backup DIR` finds the partitions **by fstype +
+  marker, not by number** (`settings_on_card`; markers must stay unique per fstype),
+  mounts them read-only (`RO_OPTIONS`: ext4 `noload`) and writes `DIR/<os>.tar.gz` with
+  entries `<role>/<path>` (0600/0700, chowned to `SUDO_UID`).
+- `--restore DIR` runs in `flash` after every `prepare` (ROCKNIX's `/usr/config` seeding
+  would overwrite a restored system.cfg), then `after_restore` re-applies card-specific
+  values: ROCKNIX `fix_system_cfg`; knulli copies its wifi/boot keys into
+  `knulli-boot.conf` (S08connman reads that before /userdata is mounted); MustardOS
+  writes `wifi.conf` on ROMS from `config/network` (its first boot imports it, then
+  formats ROMS). Never back up what the script writes or what marks first boot: fstab,
+  boot.ini, MustardOS `config/boot` (`factory_reset=1`) and `device/config`, `.configured`,
+  machine ids, version stamps.
+- `restore` checks entries itself (role prefix, no `..`, nothing through a symlink in the
+  archive or on the card) and extracts with `filter="fully_trusted"`: the safe filters
+  refuse absolute symlinks such as dArkOS's `/etc/localtime`. Owners are kept
+  (`numeric_owner`; the archive is from the same OS, ArkOS `ark` is 1002, dArkOS 1000).
+- Not yet run on a card.
 
 ## Boot scripts
 

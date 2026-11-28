@@ -53,7 +53,7 @@ then Vol+, and on cards with more OSes the next keys:
 
 | Device | OSes per card | Keys after Vol-/Vol+ |
 |---|---|---|
-| G350 | 2–6 | L1, R1, then L1+R1 held together |
+| G350 | 2–6 | L1, R1, then L2 |
 | RGB30 | 2–4 | L1 |
 | CubeXX | 2–3 | none |
 
@@ -537,7 +537,8 @@ sudo cp /mnt/device_trees/sun50i-h700-anbernic-rgcubexx.dtb /mnt/dtb.img
 `src/flash-dualboot.py` needs Python 3.8 or newer (standard library only).
 
 ```sh
-sudo python3 src/flash-dualboot.py [--device g350|cubexx|rgb30] --os LIST [--default OS] [--plan] [/dev/sdX]
+sudo python3 src/flash-dualboot.py [--device g350|cubexx|rgb30] --os LIST [--default OS] [--restore DIR] [--plan] [/dev/sdX]
+sudo python3 src/flash-dualboot.py --backup DIR [/dev/sdX]
 
 sudo python3 src/flash-dualboot.py --os amberelec,darkos,mustardos /dev/sdb   # G350, dArkOS default
 sudo python3 src/flash-dualboot.py --os amberelec,mustardos --default mustardos /dev/sdb
@@ -561,6 +562,39 @@ sudo IMGDIR=/path/to/images python3 src/flash-dualboot.py --os darkos,mustardos 
 The script checks that the device is a removable disk or SD slot of 32GB–2TiB and is
 not the system disk (the ROM partitions grow with the card), asks
 you to type `YES`, then does everything, verifies the result and ejects the card.
+
+### Keeping settings when you rebuild a card (`--backup`, `--restore`)
+
+Rebuilding a card erases every OS's settings. To keep the **system and Wi-Fi settings**
+(not saves, ROMs, RetroArch or emulator configs beyond those listed), copy them off
+the old card first, then hand them to the new build:
+
+```sh
+sudo python3 src/flash-dualboot.py --backup backups/2026-11-28 /dev/sdb     # read-only
+sudo python3 src/flash-dualboot.py --os ... --restore backups/2026-11-28 /dev/sdb
+```
+
+- `--backup DIR` needs no `--os`: it finds each OS's settings on the card by its
+  filesystem and a file only that OS has, so it works on any card this script built,
+  whatever its layout. It writes `DIR/<os>.tar.gz` and `DIR/manifest.txt`, readable only
+  by you (the archives hold Wi-Fi passwords; `backups/` is git-ignored).
+  Shut each OS down cleanly before the backup (MustardOS and knulli write some
+  settings at shutdown).
+- `--restore DIR` unpacks the backup of each `--os` OS onto the new card after the
+  script's own setup; OSes without a backup start fresh. Card-specific values the script
+  sets are put back afterwards (ROCKNIX `system.gamesdevice`, `updates.enabled`), and
+  version stamps, first-boot flags, machine ids and partition numbers are never backed up.
+  Restore onto the same device: settings files differ between devices.
+
+| OS | What is kept | Wi-Fi |
+|---|---|---|
+| AmberELEC | `distribution.conf`, EmulationStation settings and input, Bluetooth, timezone | connman networks |
+| ArkOS, dArkOS | what its own *Backup Settings* keeps, minus RetroArch/Kodi/savestates: EmulationStation settings and collections, its `~/.config` option flags, timezone, mupen64plus/drastic config, volume, brightness | NetworkManager connections |
+| knulli | `knulli.conf`, EmulationStation settings and input, Bluetooth pairings | from `knulli.conf`, also copied to `knulli-boot.conf` so it connects on the first boot |
+| MustardOS | `/opt/muos/config` (without version, boot and device state) | the current network, as a `wifi.conf` its first boot imports (it formats ROMS, losing the other saved profiles) |
+| ROCKNIX | `system.cfg`, EmulationStation settings and input, Bluetooth, timezone | NetworkManager / iwd connections |
+
+Tested only on directories standing in for the partitions, not yet on a card.
 
 ### Installing the tools
 
